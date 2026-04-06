@@ -1,0 +1,15 @@
+.venv/
+.uv-cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+node_modules/
+.env
+.env.local
+

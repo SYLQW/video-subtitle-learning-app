@@ -1,0 +1,33 @@
+{
+  "improved_translation": "看。我们今天稍微被大雪困住了。所谓“被雪困住”，意思是……",
+  "natural_translation": "你看。今天雪下得有点大，我们暂时出不去了。“被雪困住”就是说……",
+  "keywords": [
+    {
+      "word": "see",
+      "meaning": "你看/你瞧",
+      "note": "此处为口语话语标记语，用于引起对方注意或确认对方理解，非字面“看见”。"
+    },
+    {
+      "word": "snowed in",
+      "meaning": "因大雪被困/无法出门",
+      "note": "固定搭配，常用于描述天气导致交通或出行受阻的状态。"
+    },
+    {
+      "word": "a little bit",
+      "meaning": "稍微/有点",
+      "note": "修饰程度，使语气更委婉自然，符合英语母语者表达习惯。"
+    }
+  ],
+  "grammar_points": [
+    "be + 过去分词 + 介词（如 snowed in）常构成被动语态的习语，表示受外界因素影响的状态。",
+    "When..., it means that... 是典型的解释性句型，用于对前文提到的现象或词汇进行定义说明。",
+    "口语中常省略连接词或标点，如 see. 独立成句，实际起承上启下或引起注意的作用。"
+  ],
+  "structure_explanation": "全句分为三层：1. see.（引起注意）；2. We're a little bit snowed in today.（陈述当前状态）；3. When you're snowed in it means that there's...（对短语进行定义解释）。整体遵循“提示-现象-释义”的口语逻辑，结构紧凑且符合母语者思维习惯。",
+  "learning_tip": "积累“be + 过去分词 + 方位介词”的习语组合（如 locked in, boxed in, tied up），能大幅提升听力理解与地道表达。遇到 see/you know 等词时，先判断其是否为语气词，避免逐字硬译。",
+  "questions_to_ask": [
+    "be snowed in 和 be stuck in the snow 在语感和使用场景上有何不同？",
+    "为什么这里的 see 不翻译成“看见”？你能举出两个类似用法的例子吗？",
+    "尝试用 When you're..., it means that... 句型解释一个你熟悉的日常现象。"
+  ]
+}
