@@ -12,4 +12,4 @@ build/
 node_modules/
 .env
 .env.local
-
+data/*.sqlite3

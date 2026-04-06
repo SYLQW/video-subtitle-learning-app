@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import srt
 
 from backend.app.services.llm_common import OpenAICompatibleConfig, post_chat_json
@@ -26,6 +28,14 @@ Return this JSON shape:
 """
 
 
+@dataclass
+class DeepLXConfig:
+    url: str
+    source_lang: str = "EN"
+    target_lang: str = "ZH"
+    timeout_seconds: float = 60.0
+
+
 TranslationConfig = OpenAICompatibleConfig
 
 
@@ -45,19 +55,17 @@ def _parse_translation_response(content: str) -> dict[int, str]:
     return result
 
 
-def translate_transcript_segments(
+def translate_segments_with_llm(
     transcript: TranscriptResult,
     config: TranslationConfig,
-    batch_size: int = 12,
+    batch_size: int = 1,
 ) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
-
     for start in range(0, len(transcript.segments), batch_size):
         batch = transcript.segments[start : start + batch_size]
         user_prompt = _build_user_prompt([{"index": seg.index, "text": seg.text} for seg in batch])
         content = post_chat_json(config, TRANSLATION_SYSTEM_PROMPT, user_prompt, temperature=0.2)
         translations = _parse_translation_response(content)
-
         for segment in batch:
             output.append(
                 {
@@ -68,7 +76,36 @@ def translate_transcript_segments(
                     "zh": translations.get(segment.index, ""),
                 }
             )
+    return output
 
+
+def translate_segments_with_deeplx(
+    transcript: TranscriptResult,
+    config: DeepLXConfig,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    with httpx.Client(timeout=config.timeout_seconds) as client:
+        for segment in transcript.segments:
+            response = client.post(
+                config.url,
+                headers={"Content-Type": "application/json"},
+                json={
+                    "text": segment.text,
+                    "source_lang": config.source_lang,
+                    "target_lang": config.target_lang,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            output.append(
+                {
+                    "id": segment.index,
+                    "start": segment.start,
+                    "end": segment.end,
+                    "en": segment.text,
+                    "zh": str(payload.get("data", "")).strip(),
+                }
+            )
     return output
 
 
@@ -111,3 +148,4 @@ def save_bilingual_outputs(
     zh_srt_path.write_text(_compose_srt(bilingual_segments, "zh"), encoding="utf-8")
     bilingual_srt_path.write_text(_compose_srt(bilingual_segments, "bilingual"), encoding="utf-8")
     return bilingual_path, zh_srt_path, bilingual_srt_path
+

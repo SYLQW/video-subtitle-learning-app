@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -28,8 +30,161 @@ class TranscriptResult:
     segments: list[TranscriptSegment]
 
 
+@dataclass
+class WordToken:
+    text: str
+    start: float
+    end: float
+
+
+SENTENCE_END_RE = re.compile(r"[.!?][\"')\]]*$")
+
+
+def _configure_windows_gpu_runtime() -> None:
+    if os.name != "nt":
+        return
+
+    candidate_dirs: list[Path] = []
+    cuda_path = os.environ.get("CUDA_PATH")
+    if cuda_path:
+        candidate_dirs.extend([Path(cuda_path) / "bin", Path(cuda_path) / "libnvvp"])
+
+    for drive in [Path(f"{letter}:\\") for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ"]:
+        if not drive.exists():
+            continue
+        candidate_dirs.extend((drive / "NVIDIA GPU Computing Toolkit" / "CUDA").glob("v*\\bin"))
+        candidate_dirs.extend((drive / "NVIDIA GPU Computing Toolkit" / "CUDA").glob("v*\\libnvvp"))
+        candidate_dirs.extend((drive / "NVIDIA" / "CUDNN").glob("v*\\bin\\*\\x64"))
+
+    resolved_dirs: list[str] = []
+    seen: set[str] = set()
+    for directory in candidate_dirs:
+        if not directory.exists():
+            continue
+        resolved = str(directory.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        resolved_dirs.append(resolved)
+
+    if resolved_dirs:
+        os.environ["PATH"] = os.pathsep.join(resolved_dirs + [os.environ.get("PATH", "")])
+        add_dll_directory = getattr(os, "add_dll_directory", None)
+        if add_dll_directory is not None:
+            for directory in resolved_dirs:
+                add_dll_directory(directory)
+
+
+_configure_windows_gpu_runtime()
+
+
 def _normalize_text(text: str) -> str:
-    return " ".join(text.strip().split())
+    compact = " ".join(text.strip().split())
+    return re.sub(r"\s+([,.!?;:])", r"\1", compact)
+
+
+def _raw_word_text(word: Any) -> str:
+    return str(getattr(word, "word", ""))
+
+
+def _to_word_tokens(raw_segments: list[Any]) -> list[WordToken]:
+    tokens: list[WordToken] = []
+    for segment in raw_segments:
+        for word in getattr(segment, "words", None) or []:
+            start = getattr(word, "start", None)
+            end = getattr(word, "end", None)
+            text = _raw_word_text(word)
+            if start is None or end is None or not text.strip():
+                continue
+            tokens.append(
+                WordToken(
+                    text=text,
+                    start=round(float(start), 3),
+                    end=round(float(end), 3),
+                )
+            )
+    return tokens
+
+
+def _compose_text(tokens: list[WordToken]) -> str:
+    return _normalize_text("".join(token.text for token in tokens))
+
+
+def _is_sentence_boundary(current_tokens: list[WordToken], next_token: WordToken | None) -> bool:
+    if not current_tokens:
+        return False
+
+    current_text = _compose_text(current_tokens)
+    if SENTENCE_END_RE.search(current_text):
+        return True
+
+    duration = current_tokens[-1].end - current_tokens[0].start
+    next_gap = (next_token.start - current_tokens[-1].end) if next_token else 0.0
+
+    if next_gap >= 1.1 and len(current_text) >= 24:
+        return True
+
+    if duration >= 13.0 and len(current_text) >= 80:
+        return True
+
+    return False
+
+
+def _sentence_segments_from_words(word_tokens: list[WordToken]) -> list[TranscriptSegment]:
+    if not word_tokens:
+        return []
+
+    segments: list[TranscriptSegment] = []
+    current_tokens: list[WordToken] = []
+
+    for index, token in enumerate(word_tokens):
+        current_tokens.append(token)
+        next_token = word_tokens[index + 1] if index + 1 < len(word_tokens) else None
+        if not _is_sentence_boundary(current_tokens, next_token):
+            continue
+
+        text = _compose_text(current_tokens)
+        if text:
+            segments.append(
+                TranscriptSegment(
+                    index=len(segments) + 1,
+                    start=current_tokens[0].start,
+                    end=current_tokens[-1].end,
+                    text=text,
+                )
+            )
+        current_tokens = []
+
+    if current_tokens:
+        text = _compose_text(current_tokens)
+        if text:
+            segments.append(
+                TranscriptSegment(
+                    index=len(segments) + 1,
+                    start=current_tokens[0].start,
+                    end=current_tokens[-1].end,
+                    text=text,
+                )
+            )
+
+    return segments
+
+
+def _fallback_segments(raw_segments: list[Any]) -> list[TranscriptSegment]:
+    segments: list[TranscriptSegment] = []
+    for raw_segment in raw_segments:
+        text = _normalize_text(raw_segment.text)
+        if not text:
+            continue
+        segments.append(
+            TranscriptSegment(
+                index=len(segments) + 1,
+                start=round(float(raw_segment.start), 3),
+                end=round(float(raw_segment.end), 3),
+                text=text,
+            )
+        )
+    return segments
 
 
 def transcribe_video(
@@ -39,7 +194,7 @@ def transcribe_video(
     compute_type: str = "float16",
     beam_size: int = 5,
     vad_filter: bool = True,
-    word_timestamps: bool = False,
+    word_timestamps: bool = True,
 ) -> TranscriptResult:
     source = Path(video_path).expanduser().resolve()
     model = WhisperModel(model_size, device=device, compute_type=compute_type)
@@ -49,21 +204,14 @@ def transcribe_video(
         beam_size=beam_size,
         vad_filter=vad_filter,
         word_timestamps=word_timestamps,
+        condition_on_previous_text=False,
     )
 
-    segments: list[TranscriptSegment] = []
-    for index, segment in enumerate(segments_iter, start=1):
-        text = _normalize_text(segment.text)
-        if not text:
-            continue
-        segments.append(
-            TranscriptSegment(
-                index=index,
-                start=round(float(segment.start), 3),
-                end=round(float(segment.end), 3),
-                text=text,
-            )
-        )
+    raw_segments = list(segments_iter)
+    word_tokens = _to_word_tokens(raw_segments)
+    segments = _sentence_segments_from_words(word_tokens)
+    if not segments:
+        segments = _fallback_segments(raw_segments)
 
     return TranscriptResult(
         source_path=str(source),
@@ -114,4 +262,3 @@ def save_transcript_outputs(result: TranscriptResult, output_dir: str | Path) ->
     srt_path.write_text(transcript_to_srt(result), encoding="utf-8")
 
     return json_path, srt_path
-

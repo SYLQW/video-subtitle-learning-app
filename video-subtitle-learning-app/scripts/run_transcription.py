@@ -89,9 +89,9 @@ def parse_args() -> argparse.Namespace:
         help="Disable VAD filtering during transcription.",
     )
     parser.add_argument(
-        "--word-timestamps",
+        "--no-word-timestamps",
         action="store_true",
-        help="Generate word timestamps during transcription.",
+        help="Disable word timestamps during transcription.",
     )
     return parser.parse_args()
 
@@ -105,7 +105,7 @@ def main() -> None:
         compute_type=args.compute_type,
         beam_size=args.beam_size,
         vad_filter=not args.no_vad_filter,
-        word_timestamps=args.word_timestamps,
+        word_timestamps=not args.no_word_timestamps,
     )
     json_path, srt_path = save_transcript_outputs(result, args.output_dir)
 
