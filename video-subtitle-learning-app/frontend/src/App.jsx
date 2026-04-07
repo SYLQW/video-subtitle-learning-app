@@ -113,6 +113,110 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
+function makeProfile(name = "新配置") {
+  return {
+    id: `profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    base_url: "",
+    api_key: "",
+    model: "",
+    api_style: "chat_completions",
+  };
+}
+
+function cloneSettings(value) {
+  return value ? JSON.parse(JSON.stringify(value)) : value;
+}
+
+function getApiStyleHelpText(apiStyle) {
+  return apiStyle === "responses"
+    ? "豆包官方 SDK 示例更接近填写根路径 https://ark.cn-beijing.volces.com/api/v3；应用也兼容直接填完整的 /responses 地址。"
+    : "Chat Completions 通常填写供应商的兼容根路径，例如 .../compatible-mode/v1，后端会自动补上 /chat/completions。";
+}
+
+function resolveEndpointPreview(baseUrl, apiStyle) {
+  const safeBase = (baseUrl ?? "").trim().replace(/([^:]\/)\/+/g, "$1").replace(/\/+$/, "");
+  if (!safeBase) return "";
+  if (apiStyle === "responses") {
+    if (safeBase.endsWith("/responses/chat/completions")) return safeBase.replace(/\/chat\/completions$/, "");
+    if (safeBase.endsWith("/responses")) return safeBase;
+    if (safeBase.endsWith("/chat/completions")) return `${safeBase.replace(/\/chat\/completions$/, "")}/responses`;
+    return `${safeBase}/responses`;
+  }
+  if (safeBase.endsWith("/responses/chat/completions")) return `${safeBase.replace(/\/responses\/chat\/completions$/, "")}/chat/completions`;
+  if (safeBase.endsWith("/chat/completions")) return safeBase;
+  if (safeBase.endsWith("/responses")) return `${safeBase.replace(/\/responses$/, "")}/chat/completions`;
+  return `${safeBase}/chat/completions`;
+}
+
+function SelectMenu({ value, options, onChange, placeholder = "请选择" }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const selectedOption = options.find((option) => option.value === value) ?? null;
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const handlePointerDown = (event) => {
+      if (rootRef.current && !rootRef.current.contains(event.target)) {
+        setOpen(false);
+      }
+    };
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div className={`select-shell ${open ? "open" : ""}`} ref={rootRef}>
+      <button
+        type="button"
+        className="select-trigger"
+        onClick={() => setOpen((current) => !current)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span className="select-trigger-label">{selectedOption?.label ?? placeholder}</span>
+        <span className="select-trigger-arrow" aria-hidden="true">⌄</span>
+      </button>
+
+      {open ? (
+        <div className="select-menu" role="listbox">
+          {options.map((option) => {
+            const isSelected = option.value === value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="option"
+                aria-selected={isSelected}
+                className={`select-option ${isSelected ? "selected" : ""}`}
+                onClick={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                }}
+              >
+                <span>{option.label}</span>
+                {isSelected ? <span className="select-option-check">✓</span> : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function App() {
   const [videos, setVideos] = useState([]);
   const [settings, setSettings] = useState(null);
@@ -130,6 +234,7 @@ function App() {
   const [saveState, setSaveState] = useState("");
   const [uploadState, setUploadState] = useState("");
   const [processingVideoId, setProcessingVideoId] = useState(null);
+  const [connectionTestState, setConnectionTestState] = useState({});
   const [isCompactLayout, setIsCompactLayout] = useState(() => window.innerWidth <= 1180);
   const [videoPanelHeight, setVideoPanelHeight] = useState(420);
   const [isResizing, setIsResizing] = useState(false);
@@ -142,7 +247,18 @@ function App() {
   const fileInputRef = useRef(null);
   const resizeStateRef = useRef({ startY: 0, startHeight: 420 });
 
-  const analysisModel = settings?.analysis?.model ?? "qwen3.6-plus";
+  const draftProfiles = draftSettings?.profiles?.llm ?? [];
+  const activeSettingsProfiles = settings?.profiles?.llm ?? [];
+  const selectedTranslationProfile =
+    draftProfiles.find((profile) => profile.id === draftSettings?.translation?.llm_profile_id) ?? draftProfiles[0] ?? null;
+  const selectedAnalysisProfile =
+    draftProfiles.find((profile) => profile.id === draftSettings?.analysis?.profile_id) ?? draftProfiles[0] ?? null;
+  const activeTranslationProfile =
+    activeSettingsProfiles.find((profile) => profile.id === settings?.translation?.llm_profile_id) ?? activeSettingsProfiles[0] ?? null;
+  const activeAnalysisProfile =
+    activeSettingsProfiles.find((profile) => profile.id === settings?.analysis?.profile_id) ?? activeSettingsProfiles[0] ?? null;
+  const activeTranslationLabel = settings?.translation?.provider === "deeplx" ? "DeepLX" : activeTranslationProfile?.name || "LLM";
+  const analysisModel = activeAnalysisProfile?.model ?? "qwen3.6-plus";
   const currentVideo = session?.video ?? null;
   const selectedSegment = session?.segments.find((segment) => segment.id === selectedId) ?? null;
   const currentVideoRecord = videos.find((video) => currentVideo && video.id === currentVideo.id) ?? null;
@@ -151,11 +267,21 @@ function App() {
   const analysis = analysisPayload?.analysis ?? null;
   const streamingAnalysis = buildStreamingAnalysis(analysisStatus.streamText);
   const showStreamingCards = analysisStatus.loading && hasStreamingContent(streamingAnalysis);
+  const providerOptions = [
+    { value: "deeplx", label: "DeepLX" },
+    { value: "llm", label: "通用大模型" },
+  ];
+  const apiStyleOptions = [
+    { value: "chat_completions", label: "OpenAI Chat Completions" },
+    { value: "responses", label: "Responses API" },
+  ];
+  const profileOptions = draftProfiles.map((profile) => ({ value: profile.id, label: profile.name }));
 
   function getVideoHeightBounds() {
     const totalHeight = leftColumnRef.current?.getBoundingClientRect().height ?? window.innerHeight - 140;
     const minHeight = 300;
-    const maxHeight = Math.max(minHeight, totalHeight - 280 - 14);
+    const minAnalysisHeight = 112;
+    const maxHeight = Math.max(minHeight, totalHeight - minAnalysisHeight - 14);
     return { minHeight, maxHeight };
   }
 
@@ -167,7 +293,7 @@ function App() {
         const settingsPayload = await settingsResponse.json();
         const videosPayload = await videosResponse.json();
         setSettings(settingsPayload);
-        setDraftSettings(settingsPayload);
+        setDraftSettings(cloneSettings(settingsPayload));
         setVideos(videosPayload.videos);
         if (videosPayload.videos.length > 0) await loadSession(videosPayload.videos[0].id);
       } catch (error) {
@@ -347,6 +473,135 @@ function App() {
     setDraftSettings((current) => ({ ...current, [section]: { ...current[section], [field]: value } }));
   }
 
+  function updateProfileField(profileId, field, value) {
+    setDraftSettings((current) => ({
+      ...current,
+      profiles: {
+        ...current.profiles,
+        llm: current.profiles.llm.map((profile) => (profile.id === profileId ? { ...profile, [field]: value } : profile)),
+      },
+    }));
+  }
+
+  function selectProfile(section, profileId) {
+    const targetField = section === "translation" ? "llm_profile_id" : "profile_id";
+    updateDraftSetting(section, targetField, profileId);
+  }
+
+  function addProfile(section) {
+    const profileName = section === "translation" ? "新翻译配置" : "新解析配置";
+    const nextProfile = makeProfile(profileName);
+    setDraftSettings((current) => ({
+      ...current,
+      profiles: {
+        ...current.profiles,
+        llm: [...(current.profiles?.llm ?? []), nextProfile],
+      },
+      [section]: {
+        ...current[section],
+        [section === "translation" ? "llm_profile_id" : "profile_id"]: nextProfile.id,
+      },
+    }));
+  }
+
+  function removeProfile(profileId) {
+    setDraftSettings((current) => {
+      const currentProfiles = current?.profiles?.llm ?? [];
+      if (currentProfiles.length <= 1) {
+        setSaveState("至少保留一个 LLM 配置。");
+        return current;
+      }
+
+      const nextProfiles = currentProfiles.filter((profile) => profile.id !== profileId);
+      const fallbackProfileId = nextProfiles[0]?.id ?? "";
+      return {
+        ...current,
+        profiles: {
+          ...current.profiles,
+          llm: nextProfiles,
+        },
+        translation: {
+          ...current.translation,
+          llm_profile_id: current.translation.llm_profile_id === profileId ? fallbackProfileId : current.translation.llm_profile_id,
+        },
+        analysis: {
+          ...current.analysis,
+          profile_id: current.analysis.profile_id === profileId ? fallbackProfileId : current.analysis.profile_id,
+        },
+      };
+    });
+  }
+
+  function openSettingsPanel() {
+    setDraftSettings(cloneSettings(settings));
+    setSaveState("");
+    setConnectionTestState({});
+    setShowSettings(true);
+  }
+
+  function closeSettingsPanel() {
+    setDraftSettings(cloneSettings(settings));
+    setSaveState("");
+    setConnectionTestState({});
+    setShowSettings(false);
+  }
+
+  function applyDoubaoPreset(profileId) {
+    setDraftSettings((current) => ({
+      ...current,
+      profiles: {
+        ...current.profiles,
+        llm: current.profiles.llm.map((profile) => (
+          profile.id === profileId
+            ? {
+                ...profile,
+                api_style: "responses",
+                base_url: "https://ark.cn-beijing.volces.com/api/v3",
+                model: profile.model || "doubao-seed-2-0-lite-260215",
+              }
+            : profile
+        )),
+      },
+    }));
+    setConnectionTestState((current) => ({
+      ...current,
+      [profileId]: { status: "idle", message: "已套用豆包官方示例地址。保存后即可用于实际调用。" },
+    }));
+  }
+
+  async function testProfileConnection(profile) {
+    if (!profile) return;
+    setConnectionTestState((current) => ({
+      ...current,
+      [profile.id]: { status: "loading", message: "正在测试连接..." },
+    }));
+    try {
+      const response = await fetch("/api/llm/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(profile),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `测试失败：${response.status}`);
+      setConnectionTestState((current) => ({
+        ...current,
+        [profile.id]: {
+          status: "success",
+          message: `连接成功，实际请求地址：${payload.endpoint}`,
+          preview: payload.preview,
+        },
+      }));
+    } catch (error) {
+      setConnectionTestState((current) => ({
+        ...current,
+        [profile.id]: {
+          status: "error",
+          message: error instanceof Error ? error.message : "连接测试失败。",
+        },
+      }));
+    }
+  }
+
   async function saveSettingsToServer() {
     try {
       setSaveState("保存中...");
@@ -358,7 +613,7 @@ function App() {
       if (!response.ok) throw new Error(`保存设置失败：${response.status}`);
       const payload = await response.json();
       setSettings(payload);
-      setDraftSettings(payload);
+      setDraftSettings(cloneSettings(payload));
       setSaveState("已保存");
       setTimeout(() => setSaveState(""), 1800);
     } catch (error) {
@@ -479,8 +734,8 @@ function App() {
         </div>
         <div className="topbar-actions">
           <button type="button" className="ghost-button" onClick={() => setShowLibrary((value) => !value)}>视频库</button>
-          <button type="button" className="ghost-button" onClick={() => setShowSettings((value) => !value)}>设置</button>
-          <span className="chip chip-soft">实时翻译: {settings?.translation?.provider === "deeplx" ? "DeepLX" : settings?.translation?.llm_model || "LLM"}</span>
+          <button type="button" className="ghost-button" onClick={() => (showSettings ? closeSettingsPanel() : openSettingsPanel())}>设置</button>
+          <span className="chip chip-soft">实时翻译: {activeTranslationLabel}</span>
           <span className="chip chip-strong">{analysisModel}</span>
         </div>
       </header>
@@ -613,61 +868,200 @@ function App() {
               <p className="panel-label">Settings</p>
               <h2>翻译与模型配置</h2>
             </div>
-            <button type="button" className="ghost-button" onClick={() => setShowSettings(false)}>关闭</button>
+            <button type="button" className="ghost-button" onClick={closeSettingsPanel}>关闭</button>
           </div>
 
-          <div className="settings-grid">
-            <article className="overlay-card">
+          <div className="overlay-scroll-region">
+            <div className="settings-grid">
+              <article className="overlay-card">
               <h3>实时翻译</h3>
               <label className="field">
                 <span>Provider</span>
-                <select value={draftSettings.translation.provider} onChange={(event) => updateDraftSetting("translation", "provider", event.target.value)}>
-                  <option value="deeplx">DeepLX</option>
-                  <option value="llm">通用大模型</option>
-                </select>
+                <SelectMenu
+                  value={draftSettings.translation.provider}
+                  options={providerOptions}
+                  onChange={(nextValue) => updateDraftSetting("translation", "provider", nextValue)}
+                />
               </label>
               <label className="field">
                 <span>DeepLX URL</span>
                 <input value={draftSettings.translation.deeplx_url} onChange={(event) => updateDraftSetting("translation", "deeplx_url", event.target.value)} placeholder="https://api.deeplx.org/..." />
               </label>
-              <label className="field">
-                <span>LLM Base URL</span>
-                <input value={draftSettings.translation.llm_base_url} onChange={(event) => updateDraftSetting("translation", "llm_base_url", event.target.value)} placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" />
-              </label>
-              <label className="field">
-                <span>LLM API Key</span>
-                <input type="password" value={draftSettings.translation.llm_api_key} onChange={(event) => updateDraftSetting("translation", "llm_api_key", event.target.value)} />
-              </label>
-              <label className="field">
-                <span>LLM Model</span>
-                <input value={draftSettings.translation.llm_model} onChange={(event) => updateDraftSetting("translation", "llm_model", event.target.value)} />
-              </label>
-            </article>
+              <div className="profile-toolbar">
+                <label className="field compact-field">
+                  <span>LLM 配置</span>
+                  <SelectMenu
+                    value={draftSettings.translation.llm_profile_id}
+                    options={profileOptions}
+                    onChange={(nextValue) => selectProfile("translation", nextValue)}
+                  />
+                </label>
+                <button type="button" className="ghost-button small" onClick={() => addProfile("translation")}>
+                  新增配置
+                </button>
+              </div>
+              {selectedTranslationProfile ? (
+                <>
+                  <div className="profile-inline-actions">
+                    <button type="button" className="ghost-button small" onClick={() => applyDoubaoPreset(selectedTranslationProfile.id)}>
+                      套用豆包示例
+                    </button>
+                    <button type="button" className="ghost-button small" onClick={() => testProfileConnection(selectedTranslationProfile)}>
+                      测试连接
+                    </button>
+                  </div>
+                  <label className="field">
+                    <span>配置名称</span>
+                    <input
+                      value={selectedTranslationProfile.name}
+                      onChange={(event) => updateProfileField(selectedTranslationProfile.id, "name", event.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>接口风格</span>
+                    <SelectMenu
+                      value={selectedTranslationProfile.api_style}
+                      options={apiStyleOptions}
+                      onChange={(nextValue) => updateProfileField(selectedTranslationProfile.id, "api_style", nextValue)}
+                    />
+                    <small className="field-help">{getApiStyleHelpText(selectedTranslationProfile.api_style)}</small>
+                  </label>
+                  <label className="field">
+                    <span>LLM Base URL / Endpoint</span>
+                    <input
+                      value={selectedTranslationProfile.base_url}
+                      onChange={(event) => updateProfileField(selectedTranslationProfile.id, "base_url", event.target.value)}
+                      placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1 或 https://ark.cn-beijing.volces.com/api/v3"
+                    />
+                    <small className="field-help">
+                      当前会实际请求到：{resolveEndpointPreview(selectedTranslationProfile.base_url, selectedTranslationProfile.api_style) || "请先填写地址"}
+                    </small>
+                  </label>
+                  <label className="field">
+                    <span>LLM API Key</span>
+                    <input
+                      type="password"
+                      value={selectedTranslationProfile.api_key}
+                      onChange={(event) => updateProfileField(selectedTranslationProfile.id, "api_key", event.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>LLM Model</span>
+                    <input
+                      value={selectedTranslationProfile.model}
+                      onChange={(event) => updateProfileField(selectedTranslationProfile.id, "model", event.target.value)}
+                    />
+                  </label>
+                  <div className="profile-actions">
+                    <button type="button" className="ghost-button small danger-button" onClick={() => removeProfile(selectedTranslationProfile.id)}>
+                      删除此配置
+                    </button>
+                  </div>
+                  {connectionTestState[selectedTranslationProfile.id]?.message ? (
+                    <div className={`banner ${connectionTestState[selectedTranslationProfile.id]?.status === "error" ? "error" : "loading"}`}>
+                      <strong>{connectionTestState[selectedTranslationProfile.id]?.message}</strong>
+                      {connectionTestState[selectedTranslationProfile.id]?.preview ? (
+                        <p className="test-preview">{connectionTestState[selectedTranslationProfile.id]?.preview}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+              </article>
 
-            <article className="overlay-card">
+              <article className="overlay-card">
               <h3>点句解析 / 高级翻译</h3>
-              <label className="field">
-                <span>Analysis Base URL</span>
-                <input value={draftSettings.analysis.base_url} onChange={(event) => updateDraftSetting("analysis", "base_url", event.target.value)} />
-              </label>
-              <label className="field">
-                <span>Analysis API Key</span>
-                <input type="password" value={draftSettings.analysis.api_key} onChange={(event) => updateDraftSetting("analysis", "api_key", event.target.value)} />
-              </label>
-              <label className="field">
-                <span>Analysis Model</span>
-                <input value={draftSettings.analysis.model} onChange={(event) => updateDraftSetting("analysis", "model", event.target.value)} />
-              </label>
+              <div className="profile-toolbar">
+                <label className="field compact-field">
+                  <span>解析配置</span>
+                  <SelectMenu
+                    value={draftSettings.analysis.profile_id}
+                    options={profileOptions}
+                    onChange={(nextValue) => selectProfile("analysis", nextValue)}
+                  />
+                </label>
+                <button type="button" className="ghost-button small" onClick={() => addProfile("analysis")}>
+                  新增配置
+                </button>
+              </div>
+              {selectedAnalysisProfile ? (
+                <>
+                  <div className="profile-inline-actions">
+                    <button type="button" className="ghost-button small" onClick={() => applyDoubaoPreset(selectedAnalysisProfile.id)}>
+                      套用豆包示例
+                    </button>
+                    <button type="button" className="ghost-button small" onClick={() => testProfileConnection(selectedAnalysisProfile)}>
+                      测试连接
+                    </button>
+                  </div>
+                  <label className="field">
+                    <span>配置名称</span>
+                    <input
+                      value={selectedAnalysisProfile.name}
+                      onChange={(event) => updateProfileField(selectedAnalysisProfile.id, "name", event.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>接口风格</span>
+                    <SelectMenu
+                      value={selectedAnalysisProfile.api_style}
+                      options={apiStyleOptions}
+                      onChange={(nextValue) => updateProfileField(selectedAnalysisProfile.id, "api_style", nextValue)}
+                    />
+                    <small className="field-help">{getApiStyleHelpText(selectedAnalysisProfile.api_style)}</small>
+                  </label>
+                  <label className="field">
+                    <span>Analysis Base URL / Endpoint</span>
+                    <input
+                      value={selectedAnalysisProfile.base_url}
+                      onChange={(event) => updateProfileField(selectedAnalysisProfile.id, "base_url", event.target.value)}
+                      placeholder="https://ark.cn-beijing.volces.com/api/v3"
+                    />
+                    <small className="field-help">
+                      当前会实际请求到：{resolveEndpointPreview(selectedAnalysisProfile.base_url, selectedAnalysisProfile.api_style) || "请先填写地址"}
+                    </small>
+                  </label>
+                  <label className="field">
+                    <span>Analysis API Key</span>
+                    <input
+                      type="password"
+                      value={selectedAnalysisProfile.api_key}
+                      onChange={(event) => updateProfileField(selectedAnalysisProfile.id, "api_key", event.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Analysis Model</span>
+                    <input
+                      value={selectedAnalysisProfile.model}
+                      onChange={(event) => updateProfileField(selectedAnalysisProfile.id, "model", event.target.value)}
+                    />
+                  </label>
+                  <div className="profile-actions">
+                    <button type="button" className="ghost-button small danger-button" onClick={() => removeProfile(selectedAnalysisProfile.id)}>
+                      删除此配置
+                    </button>
+                  </div>
+                  {connectionTestState[selectedAnalysisProfile.id]?.message ? (
+                    <div className={`banner ${connectionTestState[selectedAnalysisProfile.id]?.status === "error" ? "error" : "loading"}`}>
+                      <strong>{connectionTestState[selectedAnalysisProfile.id]?.message}</strong>
+                      {connectionTestState[selectedAnalysisProfile.id]?.preview ? (
+                        <p className="test-preview">{connectionTestState[selectedAnalysisProfile.id]?.preview}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
               <label className="field">
                 <span>Whisper 模型</span>
                 <input value={draftSettings.transcription.model_size} onChange={(event) => updateDraftSetting("transcription", "model_size", event.target.value)} />
               </label>
-            </article>
-          </div>
+              </article>
+            </div>
 
-          <div className="overlay-footer">
-            <span className="muted">{saveState}</span>
-            <button type="button" className="primary-button" onClick={saveSettingsToServer}>保存设置</button>
+            <div className="overlay-footer">
+              <span className="muted">{saveState}</span>
+              <button type="button" className="primary-button" onClick={saveSettingsToServer}>保存设置</button>
+            </div>
           </div>
         </section>
       ) : null}
@@ -685,28 +1079,30 @@ function App() {
             </div>
           </div>
 
-          <input ref={fileInputRef} type="file" accept="video/*" hidden onChange={handleVideoUpload} />
-          {uploadState ? <div className="banner loading overlay-banner">{uploadState}</div> : null}
+          <div className="overlay-scroll-region">
+            <input ref={fileInputRef} type="file" accept="video/*" hidden onChange={handleVideoUpload} />
+            {uploadState ? <div className="banner loading overlay-banner">{uploadState}</div> : null}
 
-          <div className="video-list">
-            {videos.map((video) => (
-              <article className={`video-item ${currentVideo?.id === video.id ? "current" : ""}`} key={video.id}>
-                <div>
-                  <h3>{video.title}</h3>
-                  <p>{video.source === "demo" ? "测试目录" : video.source === "upload" ? "上传视频" : "视频库"}</p>
-                  <div className="video-badges">
-                    <span className="chip chip-soft">{video.transcript_json_path ? "已转写" : "未转写"}</span>
-                    <span className="chip chip-soft">{video.bilingual_json_path ? "已翻译" : "未翻译"}</span>
+            <div className="video-list">
+              {videos.map((video) => (
+                <article className={`video-item ${currentVideo?.id === video.id ? "current" : ""}`} key={video.id}>
+                  <div>
+                    <h3>{video.title}</h3>
+                    <p>{video.source === "demo" ? "测试目录" : video.source === "upload" ? "上传视频" : "视频库"}</p>
+                    <div className="video-badges">
+                      <span className="chip chip-soft">{video.transcript_json_path ? "已转写" : "未转写"}</span>
+                      <span className="chip chip-soft">{video.bilingual_json_path ? "已翻译" : "未翻译"}</span>
+                    </div>
                   </div>
-                </div>
-                <div className="video-actions">
-                  <button type="button" className="ghost-button small" onClick={() => loadSession(video.id)}>切换</button>
-                  <button type="button" className="primary-button small" onClick={() => processCurrentVideo(video.id)} disabled={processingVideoId === video.id}>
-                    {processingVideoId === video.id ? "处理中..." : "处理"}
-                  </button>
-                </div>
-              </article>
-            ))}
+                  <div className="video-actions">
+                    <button type="button" className="ghost-button small" onClick={() => loadSession(video.id)}>切换</button>
+                    <button type="button" className="primary-button small" onClick={() => processCurrentVideo(video.id)} disabled={processingVideoId === video.id}>
+                      {processingVideoId === video.id ? "处理中..." : "处理"}
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
           </div>
         </section>
       ) : null}

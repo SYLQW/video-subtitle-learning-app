@@ -50,6 +50,7 @@ def analyze_sentence(
     model: str,
     base_url: str,
     api_key: str,
+    api_style: str,
     previous_text: str | None = None,
     next_text: str | None = None,
 ) -> dict[str, Any]:
@@ -59,7 +60,13 @@ def analyze_sentence(
         previous_text=previous_text,
         next_text=next_text,
     )
-    config = OpenAICompatibleConfig(base_url=base_url, api_key=api_key, model=model, timeout_seconds=180.0)
+    config = OpenAICompatibleConfig(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        timeout_seconds=180.0,
+        api_style=api_style,
+    )
     content = post_chat_json(config, ANALYSIS_SYSTEM_PROMPT, payload, temperature=0.3)
     return json.loads(content)
 
@@ -71,6 +78,7 @@ def stream_sentence_analysis(
     model: str,
     base_url: str,
     api_key: str,
+    api_style: str,
     previous_text: str | None = None,
     next_text: str | None = None,
 ) -> Iterator[str]:
@@ -80,6 +88,11 @@ def stream_sentence_analysis(
         previous_text=previous_text,
         next_text=next_text,
     )
-    config = OpenAICompatibleConfig(base_url=base_url, api_key=api_key, model=model, timeout_seconds=180.0)
+    config = OpenAICompatibleConfig(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        timeout_seconds=180.0,
+        api_style=api_style,
+    )
     return stream_chat_text(config, ANALYSIS_SYSTEM_PROMPT, payload, temperature=0.3)
-

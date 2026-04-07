@@ -12,7 +12,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.app.services.analysis import analyze_sentence, stream_sentence_analysis
 from backend.app.services.database import get_analysis_cache, init_db, upsert_analysis_cache
-from backend.app.services.settings import get_app_settings, save_app_settings
+from backend.app.services.llm_common import OpenAICompatibleConfig, post_chat_json, resolve_endpoint
+from backend.app.services.settings import get_app_settings, get_llm_profile, save_app_settings
 from backend.app.services.transcription import TranscriptResult, TranscriptSegment, save_transcript_outputs, transcribe_video
 from backend.app.services.translation import (
     DeepLXConfig,
@@ -99,13 +100,15 @@ def _build_translation_config(settings: dict[str, Any]) -> tuple[str, Any]:
             ),
         )
 
+    profile = get_llm_profile(settings, translation.get("llm_profile_id"))
     return (
         provider,
         TranslationConfig(
-            base_url=translation["llm_base_url"],
-            api_key=translation["llm_api_key"],
-            model=translation["llm_model"],
+            base_url=profile["base_url"],
+            api_key=profile["api_key"],
+            model=profile["model"],
             timeout_seconds=120.0,
+            api_style=profile.get("api_style", "chat_completions"),
         ),
     )
 
@@ -131,6 +134,46 @@ def read_settings() -> dict[str, Any]:
 @app.put("/api/settings")
 def update_settings(payload: dict[str, Any]) -> dict[str, Any]:
     return save_app_settings(payload)
+
+
+@app.post("/api/llm/test")
+def test_llm_connection(payload: dict[str, Any]) -> dict[str, Any]:
+    profile = {
+        "base_url": str(payload.get("base_url") or "").strip(),
+        "api_key": str(payload.get("api_key") or "").strip(),
+        "model": str(payload.get("model") or "").strip(),
+        "api_style": str(payload.get("api_style") or "chat_completions").strip(),
+    }
+    if not profile["base_url"]:
+        raise HTTPException(status_code=400, detail="Missing base_url.")
+    if not profile["api_key"]:
+        raise HTTPException(status_code=400, detail="Missing api_key.")
+    if not profile["model"]:
+        raise HTTPException(status_code=400, detail="Missing model.")
+
+    config = OpenAICompatibleConfig(
+        base_url=profile["base_url"],
+        api_key=profile["api_key"],
+        model=profile["model"],
+        api_style=profile["api_style"],
+        timeout_seconds=60.0,
+    )
+    try:
+        preview = post_chat_json(
+            config,
+            "You are a connectivity test assistant. Reply briefly with OK and one short sentence.",
+            "hello",
+            temperature=0.1,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "endpoint": resolve_endpoint(profile["base_url"], profile["api_style"]),
+        "model": profile["model"],
+        "preview": preview[:200],
+    }
 
 
 @app.get("/api/videos")
@@ -224,7 +267,8 @@ def sentence_analysis(
     settings = get_app_settings()
     video, payload = _ensure_bilingual_payload(video_id)
     analysis_settings = settings["analysis"]
-    resolved_model = model or analysis_settings["model"]
+    analysis_profile = get_llm_profile(settings, analysis_settings.get("profile_id"))
+    resolved_model = model or analysis_profile["model"]
 
     segments = payload["bilingual_segments"]
     try:
@@ -255,8 +299,9 @@ def sentence_analysis(
         text=segment["en"],
         existing_translation=segment["zh"],
         model=resolved_model,
-        base_url=analysis_settings["base_url"],
-        api_key=analysis_settings["api_key"],
+        base_url=analysis_profile["base_url"],
+        api_key=analysis_profile["api_key"],
+        api_style=analysis_profile.get("api_style", "chat_completions"),
         previous_text=previous_text,
         next_text=next_text,
     )
@@ -279,7 +324,8 @@ def sentence_analysis_stream(
     settings = get_app_settings()
     video, payload = _ensure_bilingual_payload(video_id)
     analysis_settings = settings["analysis"]
-    resolved_model = model or analysis_settings["model"]
+    analysis_profile = get_llm_profile(settings, analysis_settings.get("profile_id"))
+    resolved_model = model or analysis_profile["model"]
 
     segments = payload["bilingual_segments"]
     try:
@@ -321,8 +367,9 @@ def sentence_analysis_stream(
                 text=segment["en"],
                 existing_translation=segment["zh"],
                 model=resolved_model,
-                base_url=analysis_settings["base_url"],
-                api_key=analysis_settings["api_key"],
+                base_url=analysis_profile["base_url"],
+                api_key=analysis_profile["api_key"],
+                api_style=analysis_profile.get("api_style", "chat_completions"),
                 previous_text=previous_text,
                 next_text=next_text,
             ):
