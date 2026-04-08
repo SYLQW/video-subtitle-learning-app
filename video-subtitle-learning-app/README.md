@@ -150,6 +150,7 @@
 
 详细说明见：
 
+- [安装与使用指南](docs/user-installation-guide.md)
 - [桌面打包与部署](docs/desktop-packaging-and-deployment.md)
 - [便携版构建说明](docs/portable-build-guide.md)
 - [FFmpeg 放置说明](docs/ffmpeg-setup.md)
@@ -170,6 +171,10 @@
 - `FFmpeg` 用于视频处理、字幕轨导出
 - `CUDA / cuDNN` 是可选增强，不是必须
 - 没有 GPU 环境时，项目仍然可以退回 CPU
+
+如果你是普通用户，而不是开发者，请优先看：
+
+- [安装与使用指南](docs/user-installation-guide.md)
 
 ## 开发环境快速开始
 
@@ -269,6 +274,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-portable.ps1 -CleanOutp
 - [桌面打包与部署](docs/desktop-packaging-and-deployment.md)
 - [便携版构建说明](docs/portable-build-guide.md)
 - [FFmpeg 放置说明](docs/ffmpeg-setup.md)
+- [安装与使用指南](docs/user-installation-guide.md)
 - [多语言字幕设计](docs/multilingual-subtitle-design.md)
 - [收集册设计](docs/collection-notebook-design.md)
 - [图标备选方案](docs/icon-style-ideas.md)
