@@ -152,6 +152,7 @@
 
 - [桌面打包与部署](docs/desktop-packaging-and-deployment.md)
 - [便携版构建说明](docs/portable-build-guide.md)
+- [FFmpeg 放置说明](docs/ffmpeg-setup.md)
 
 ## 运行时依赖
 
@@ -267,6 +268,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-portable.ps1 -CleanOutp
 
 - [桌面打包与部署](docs/desktop-packaging-and-deployment.md)
 - [便携版构建说明](docs/portable-build-guide.md)
+- [FFmpeg 放置说明](docs/ffmpeg-setup.md)
 - [多语言字幕设计](docs/multilingual-subtitle-design.md)
 - [收集册设计](docs/collection-notebook-design.md)
 - [图标备选方案](docs/icon-style-ideas.md)

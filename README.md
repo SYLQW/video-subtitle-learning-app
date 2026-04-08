@@ -6,6 +6,10 @@
 
 当前项目已经具备可运行的 Web 版开发形态，并且已经接上了 Tauri 桌面壳，正在向“同目录便携版优先”的桌面应用形态推进。
 
+## 写在前面
+
+下载源码运行的话需要在Releases下载model.bin，并需要将其放进\video-subtitle-learning-app\models\faster-whisper-base中才能使用
+
 ## 项目定位
 
 这个项目主要解决下面这类学习问题：
