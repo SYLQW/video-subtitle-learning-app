@@ -18,4 +18,3 @@ data/videos/
 outputs/
 src-tauri/target/
 *.mp4
-models/
