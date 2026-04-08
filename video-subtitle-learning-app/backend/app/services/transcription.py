@@ -15,6 +15,7 @@ from typing import Any
 import srt
 from faster_whisper import WhisperModel
 
+from backend.app.services.app_paths import get_app_root, get_data_dir, get_model_root
 from backend.app.services.language_support import whisper_language
 
 
@@ -85,8 +86,9 @@ def _configure_windows_gpu_runtime() -> None:
 
 
 _configure_windows_gpu_runtime()
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-LOCAL_MODEL_ROOT = Path(os.environ.get("VIDEO_SUBTITLE_MODEL_ROOT") or "C:/fw-models")
+PROJECT_ROOT = get_app_root()
+LOCAL_MODEL_ROOT = get_model_root()
+os.environ.setdefault("HF_HOME", str((get_data_dir() / "huggingface").resolve()))
 
 
 def _huggingface_cache_root() -> Path:
@@ -119,12 +121,23 @@ def _repair_model_cache(model_size: str) -> None:
 
 
 def _resolve_model_path(model_size: str) -> str:
-    local_path = LOCAL_MODEL_ROOT / f"faster-whisper-{model_size}"
-    if local_path.exists():
-        required = ["config.json", "tokenizer.json", "vocabulary.txt", "model.bin"]
-        if all((local_path / name).exists() for name in required):
+    candidate_paths = [
+        LOCAL_MODEL_ROOT / f"faster-whisper-{model_size}",
+        LOCAL_MODEL_ROOT / "faster-whisper" / model_size,
+        LOCAL_MODEL_ROOT / model_size,
+    ]
+    required = ["config.json", "tokenizer.json", "vocabulary.txt", "model.bin"]
+    for local_path in candidate_paths:
+        if local_path.exists() and all((local_path / name).exists() for name in required):
             return str(local_path)
     return model_size
+
+
+def resolve_local_model_path(model_size: str) -> Path | None:
+    resolved = _resolve_model_path(model_size)
+    if resolved == model_size:
+        return None
+    return Path(resolved)
 
 
 def _normalize_text(text: str) -> str:

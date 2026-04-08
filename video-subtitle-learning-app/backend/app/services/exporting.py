@@ -3,11 +3,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from backend.app.services.app_paths import get_exports_dir, get_ffmpeg_executable
 from backend.app.services.translation import compose_srt
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-EXPORT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "exports"
+EXPORT_OUTPUT_DIR = get_exports_dir()
 
 
 def _subtitle_filename(stem: str, subtitle_mode: str) -> Path:
@@ -42,7 +42,7 @@ def export_video_with_subtitles(
     if video_mode == "soft":
         output_path = EXPORT_OUTPUT_DIR / f"{stem}.{subtitle_mode}.softsub.mp4"
         command = [
-            "ffmpeg",
+            get_ffmpeg_executable(),
             "-y",
             "-i",
             str(source_path),
@@ -68,7 +68,7 @@ def export_video_with_subtitles(
         output_path = EXPORT_OUTPUT_DIR / f"{stem}.{subtitle_mode}.burned.mp4"
         subtitle_filter = f"subtitles='{_escape_subtitles_filter_path(subtitle_path)}'"
         command = [
-            "ffmpeg",
+            get_ffmpeg_executable(),
             "-y",
             "-i",
             str(source_path),

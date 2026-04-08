@@ -5,6 +5,7 @@
   "scripts": {
     "dev:web": "npm --prefix frontend run dev -- --host 127.0.0.1 --strictPort",
     "build:web": "npm --prefix frontend run build",
+    "build:portable": "powershell -ExecutionPolicy Bypass -File ./scripts/build-portable.ps1",
     "tauri": "tauri"
   },
   "devDependencies": {

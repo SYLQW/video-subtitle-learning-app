@@ -12,8 +12,14 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 
+from backend.app.services.app_paths import (
+    ensure_app_directories,
+    get_app_root,
+    get_transcripts_dir,
+    get_translations_dir,
+)
 from backend.app.services.analysis import analyze_sentence, stream_sentence_analysis
 from backend.app.services.database import (
     add_sentence_entry,
@@ -35,6 +41,7 @@ from backend.app.services.database import (
 from backend.app.services.exporting import ensure_subtitle_export, export_video_with_subtitles
 from backend.app.services.language_support import normalize_lang_code
 from backend.app.services.llm_common import OpenAICompatibleConfig, post_chat_json, resolve_endpoint
+from backend.app.services.runtime_env import get_runtime_status
 from backend.app.services.settings import get_app_settings, get_llm_profile, save_app_settings
 from backend.app.services.transcription import (
     TranscriptResult,
@@ -59,9 +66,9 @@ from backend.app.services.video_library import (
     sync_artifacts_for_stem,
     sync_video_library,
 )
+from backend.app.services.video_tasks import get_active_task_for_video, get_task, start_video_task, update_task
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = get_app_root()
 
 
 app = FastAPI(
@@ -72,7 +79,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -81,6 +93,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup() -> None:
+    ensure_app_directories()
     init_db()
     sync_video_library()
 
@@ -191,7 +204,7 @@ def _translate_and_save_video(
     bilingual_json_path, learning_srt_path, bilingual_srt_path = save_bilingual_outputs(
         transcript,
         bilingual_segments,
-        PROJECT_ROOT / "outputs" / "translations",
+        get_translations_dir(),
         source_lang=source_lang,
         learning_lang=learning_lang,
         native_lang=native_lang,
@@ -210,7 +223,14 @@ def _translate_and_save_video(
 
 
 def _source_srt_output_path(video: dict[str, Any]) -> str:
-    return str(PROJECT_ROOT / "outputs" / "transcripts" / f"{video['stem']}.source.srt")
+    return str(get_transcripts_dir() / f"{video['stem']}.source.srt")
+
+
+def _video_with_task(video: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **video,
+        "active_task": get_active_task_for_video(int(video["id"])),
+    }
 
 
 def _build_export_segments(
@@ -476,6 +496,22 @@ def update_settings(payload: dict[str, Any]) -> dict[str, Any]:
     return save_app_settings(payload)
 
 
+@app.get("/api/runtime/status")
+def read_runtime_status() -> dict[str, Any]:
+    settings = get_app_settings()
+    transcription = settings["transcription"]
+    return get_runtime_status(
+        current_model_size=str(transcription.get("model_size") or "base"),
+        device_preference=str(transcription.get("device") or "cuda"),
+        compute_type=str(transcription.get("compute_type") or "float16"),
+    )
+
+
+@app.post("/api/runtime/detect")
+def detect_runtime_status() -> dict[str, Any]:
+    return read_runtime_status()
+
+
 @app.post("/api/llm/test")
 def test_llm_connection(payload: dict[str, Any]) -> dict[str, Any]:
     profile = {
@@ -519,7 +555,7 @@ def test_llm_connection(payload: dict[str, Any]) -> dict[str, Any]:
 @app.get("/api/videos")
 def list_videos() -> dict[str, Any]:
     sync_video_library()
-    return {"videos": list_library_items()}
+    return {"videos": [_video_with_task(video) for video in list_library_items()]}
 
 
 @app.get("/api/notebooks")
@@ -645,29 +681,29 @@ def read_session(video_id: int | None = Query(default=None)) -> dict[str, Any]:
     sync_video_library()
     try:
         resolved_video_id = video_id or _first_video_id()
-        return get_video_session(resolved_video_id)
+        session = get_video_session(resolved_video_id)
+        session["video"] = _video_with_task(session["video"])
+        session["task"] = session["video"]["active_task"]
+        return session
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.get("/api/videos/{video_id}/stream")
-def stream_video(video_id: int) -> FileResponse:
-    video = get_video_session(video_id)["video"]
-    guessed_media_type, _ = mimetypes.guess_type(video["path"])
-    return FileResponse(
-        video["path"],
-        media_type=guessed_media_type or "application/octet-stream",
-        filename=Path(video["path"]).name,
-    )
+@app.get("/api/tasks/{task_id}")
+def read_task_status(task_id: str) -> dict[str, Any]:
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task id {task_id} not found.")
+    return {"task": task}
 
 
-@app.post("/api/videos/{video_id}/process")
-def process_video(video_id: int) -> dict[str, Any]:
+def _run_full_video_processing(video_id: int, task_id: str) -> dict[str, Any]:
     settings = get_app_settings()
     try:
         session = get_video_session(video_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     video = session["video"]
     transcription_settings = settings["transcription"]
     translation_settings = settings["translation"]
@@ -677,6 +713,7 @@ def process_video(video_id: int) -> dict[str, Any]:
         language=translation_settings.get("source_lang"),
     )
 
+    update_task(task_id, stage="transcribing", message="正在转写音频...")
     transcript = transcribe_video(
         video["path"],
         model_size=transcription_settings["model_size"],
@@ -686,12 +723,18 @@ def process_video(video_id: int) -> dict[str, Any]:
     )
     actual_device = transcript.runtime_device or resolved_device
     actual_compute_type = transcript.runtime_compute_type or resolved_compute_type
+
+    update_task(task_id, stage="saving_transcript", message="正在保存转写结果...")
     transcript_json_path, source_srt_path = save_transcript_outputs(
         transcript,
-        PROJECT_ROOT / "outputs" / "transcripts",
+        get_transcripts_dir(),
     )
-    translation_result = _translate_and_save_video(video=video, transcript=transcript, settings=settings)
 
+    update_task(task_id, stage="translating", message="正在翻译字幕...")
+    translation_result = _translate_and_save_video(video=video, transcript=transcript, settings=settings)
+    sync_artifacts_for_stem(Path(video["path"]).stem)
+
+    update_task(task_id, stage="finalizing", message="正在整理视频会话数据...")
     return {
         "video_id": video_id,
         "mode": "full",
@@ -712,13 +755,13 @@ def process_video(video_id: int) -> dict[str, Any]:
     }
 
 
-@app.post("/api/videos/{video_id}/translate")
-def translate_video(video_id: int) -> dict[str, Any]:
+def _run_translate_video_processing(video_id: int, task_id: str) -> dict[str, Any]:
     settings = get_app_settings()
     try:
         session = get_video_session(video_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     video = session["video"]
     if not video.get("transcript_json_path"):
         raise HTTPException(status_code=400, detail="This video has no transcript yet. Please run full processing first.")
@@ -727,9 +770,14 @@ def translate_video(video_id: int) -> dict[str, Any]:
     if not transcript_path.exists():
         raise HTTPException(status_code=400, detail="The saved transcript file is missing. Please run full processing first.")
 
+    update_task(task_id, stage="loading_transcript", message="正在读取已保存的转写结果...")
     transcript = _load_transcript(str(transcript_path))
-    translation_result = _translate_and_save_video(video=video, transcript=transcript, settings=settings)
 
+    update_task(task_id, stage="translating", message="正在翻译字幕...")
+    translation_result = _translate_and_save_video(video=video, transcript=transcript, settings=settings)
+    sync_artifacts_for_stem(Path(video["path"]).stem)
+
+    update_task(task_id, stage="finalizing", message="正在整理视频会话数据...")
     return {
         "video_id": video_id,
         "mode": "translate_only",
@@ -745,6 +793,37 @@ def translate_video(video_id: int) -> dict[str, Any]:
         "zh_srt_path": translation_result["zh_srt_path"],
         "bilingual_srt_path": translation_result["bilingual_srt_path"],
     }
+
+
+@app.get("/api/videos/{video_id}/stream")
+def stream_video(video_id: int) -> FileResponse:
+    video = get_video_session(video_id)["video"]
+    guessed_media_type, _ = mimetypes.guess_type(video["path"])
+    return FileResponse(
+        video["path"],
+        media_type=guessed_media_type or "application/octet-stream",
+        filename=Path(video["path"]).name,
+    )
+
+
+@app.post("/api/videos/{video_id}/process")
+def process_video(video_id: int) -> dict[str, Any]:
+    task, started = start_video_task(
+        video_id,
+        "full",
+        lambda task_id: _run_full_video_processing(video_id, task_id),
+    )
+    return JSONResponse(content={"task": task, "started": started}, status_code=202 if started else 200)
+
+
+@app.post("/api/videos/{video_id}/translate")
+def translate_video(video_id: int) -> dict[str, Any]:
+    task, started = start_video_task(
+        video_id,
+        "translate_only",
+        lambda task_id: _run_translate_video_processing(video_id, task_id),
+    )
+    return JSONResponse(content={"task": task, "started": started}, status_code=202 if started else 200)
 
 
 @app.get("/api/videos/{video_id}/analysis")

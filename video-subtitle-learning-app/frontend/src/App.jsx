@@ -266,6 +266,32 @@ const NOTEBOOK_EXPORT_OPTIONS = [
 ];
 
 const EMPTY_ANALYSIS_STATUS = { loading: false, message: "", streamText: "", error: "" };
+const EMPTY_PROCESSING_STATE = {
+  taskId: "",
+  videoId: null,
+  mode: "",
+  status: "idle",
+  stage: "",
+  message: "",
+  error: "",
+};
+
+function isTaskRunning(task) {
+  return task && (task.status === "queued" || task.status === "running");
+}
+
+function createProcessingStateFromTask(task) {
+  if (!task) return EMPTY_PROCESSING_STATE;
+  return {
+    taskId: task.id || "",
+    videoId: task.video_id ?? null,
+    mode: task.mode || "",
+    status: task.status || "idle",
+    stage: task.stage || "",
+    message: task.message || "",
+    error: task.error || "",
+  };
+}
 
 function createCollectionDialogState() {
   return {
@@ -364,7 +390,7 @@ function App() {
   const [saveState, setSaveState] = useState("");
   const [uploadState, setUploadState] = useState("");
   const [exportState, setExportState] = useState("");
-  const [processingState, setProcessingState] = useState({ videoId: null, mode: "" });
+  const [processingState, setProcessingState] = useState(EMPTY_PROCESSING_STATE);
   const [deletingVideoId, setDeletingVideoId] = useState(null);
   const [notebooks, setNotebooks] = useState([]);
   const [activeNotebookId, setActiveNotebookId] = useState(null);
@@ -372,6 +398,8 @@ function App() {
   const [notebookState, setNotebookState] = useState({ loading: false, saving: false, message: "", error: "" });
   const [collectionDialog, setCollectionDialog] = useState(createCollectionDialogState);
   const [notebookDialog, setNotebookDialog] = useState(createNotebookDialogState);
+  const [runtimeStatus, setRuntimeStatus] = useState(null);
+  const [runtimeState, setRuntimeState] = useState({ loading: false, error: "" });
   const [connectionTestState, setConnectionTestState] = useState({});
   const [isCompactLayout, setIsCompactLayout] = useState(() => window.innerWidth <= 1180);
   const [videoPanelHeight, setVideoPanelHeight] = useState(420);
@@ -386,6 +414,8 @@ function App() {
   const analysisAbortRef = useRef(null);
   const fileInputRef = useRef(null);
   const resizeStateRef = useRef({ startY: 0, startHeight: 420 });
+  const taskPollTimeoutRef = useRef(null);
+  const currentVideoIdRef = useRef(null);
 
   const draftProfiles = draftSettings?.profiles?.llm ?? [];
   const activeSettingsProfiles = settings?.profiles?.llm ?? [];
@@ -445,23 +475,127 @@ function App() {
     return { minHeight, maxHeight };
   }
 
+  function stopTaskPolling() {
+    if (taskPollTimeoutRef.current) {
+      window.clearTimeout(taskPollTimeoutRef.current);
+      taskPollTimeoutRef.current = null;
+    }
+  }
+
+  function getActiveTaskCandidate(videoId = null) {
+    if (videoId != null) {
+      const listTask = videos.find((video) => video.id === videoId)?.active_task ?? null;
+      if (isTaskRunning(listTask)) return listTask;
+      if (currentVideo?.id === videoId && isTaskRunning(session?.task)) return session.task;
+      if (processingState.videoId === videoId && isTaskRunning(processingState)) {
+        return {
+          id: processingState.taskId,
+          video_id: processingState.videoId,
+          mode: processingState.mode,
+          status: processingState.status,
+          stage: processingState.stage,
+          message: processingState.message,
+          error: processingState.error,
+        };
+      }
+      return null;
+    }
+
+    return videos.map((video) => video.active_task).find((task) => isTaskRunning(task)) ?? null;
+  }
+
+  function scheduleTaskPolling(task) {
+    if (!isTaskRunning(task) || !task.id) return;
+    stopTaskPolling();
+    taskPollTimeoutRef.current = window.setTimeout(() => {
+      void pollTaskStatus(task.id, task.video_id);
+    }, 1400);
+  }
+
+  function syncProcessingState(task, { startPolling = true } = {}) {
+    if (!isTaskRunning(task)) {
+      if (processingState.taskId === task?.id || !task) {
+        setProcessingState(EMPTY_PROCESSING_STATE);
+      }
+      if (!task) stopTaskPolling();
+      return;
+    }
+
+    setProcessingState(createProcessingStateFromTask(task));
+    if (startPolling) scheduleTaskPolling(task);
+  }
+
+  async function pollTaskStatus(taskId, videoId) {
+    try {
+      const response = await apiFetch(`/api/tasks/${taskId}`);
+      if (response.status === 404) {
+        stopTaskPolling();
+        setProcessingState(EMPTY_PROCESSING_STATE);
+        return;
+      }
+      if (!response.ok) throw new Error(`查询任务状态失败：${response.status}`);
+
+      const payload = await response.json();
+      const task = payload.task ?? null;
+      if (!task) {
+        stopTaskPolling();
+        setProcessingState(EMPTY_PROCESSING_STATE);
+        return;
+      }
+
+      if (isTaskRunning(task)) {
+        setProcessingState(createProcessingStateFromTask(task));
+        scheduleTaskPolling(task);
+        return;
+      }
+
+      stopTaskPolling();
+      setProcessingState(EMPTY_PROCESSING_STATE);
+      if (task.status === "failed") {
+        setSessionError(task.error || task.message || "视频处理失败。");
+      } else {
+        setSessionError("");
+      }
+      await refreshVideos(currentVideoIdRef.current === videoId ? videoId : null, { preserveSelection: true });
+    } catch (error) {
+      setProcessingState((current) => ({
+        ...current,
+        message: error instanceof Error ? error.message : "查询任务状态失败。",
+      }));
+      taskPollTimeoutRef.current = window.setTimeout(() => {
+        void pollTaskStatus(taskId, videoId);
+      }, 2200);
+    }
+  }
+
+  useEffect(() => {
+    currentVideoIdRef.current = currentVideo?.id ?? null;
+  }, [currentVideo]);
+
   useEffect(() => {
     async function bootstrap() {
       try {
-        const [settingsResponse, videosResponse, notebooksResponse] = await Promise.all([
+        const [settingsResponse, videosResponse, notebooksResponse, runtimeResponse] = await Promise.all([
           apiFetch("/api/settings"),
           apiFetch("/api/videos"),
           apiFetch("/api/notebooks"),
+          apiFetch("/api/runtime/status"),
         ]);
-        if (!settingsResponse.ok || !videosResponse.ok || !notebooksResponse.ok) throw new Error("初始化应用失败。");
+        if (!settingsResponse.ok || !videosResponse.ok || !notebooksResponse.ok || !runtimeResponse.ok) throw new Error("初始化应用失败。");
         const settingsPayload = await settingsResponse.json();
         const videosPayload = await videosResponse.json();
         const notebooksPayload = await notebooksResponse.json();
+        const runtimePayload = await runtimeResponse.json();
         setSettings(settingsPayload);
         setDraftSettings(cloneSettings(settingsPayload));
         setVideos(videosPayload.videos);
         setNotebooks(notebooksPayload.notebooks ?? []);
         setActiveNotebookId((current) => current ?? notebooksPayload.notebooks?.[0]?.id ?? null);
+        setRuntimeStatus(runtimePayload);
+        const bootTask = (videosPayload.videos ?? []).map((video) => video.active_task).find((task) => isTaskRunning(task)) ?? null;
+        if (bootTask) {
+          syncProcessingState(bootTask);
+        }
         if (videosPayload.videos.length > 0) await loadSession(videosPayload.videos[0].id);
       } catch (error) {
         setSessionError(error instanceof Error ? error.message : "初始化应用失败。");
@@ -470,6 +604,7 @@ function App() {
 
     bootstrap();
     return () => {
+      stopTaskPolling();
       if (analysisAbortRef.current) analysisAbortRef.current.abort();
       if (reviewTimeoutRef.current) clearTimeout(reviewTimeoutRef.current);
     };
@@ -648,28 +783,46 @@ function App() {
     };
   }, [isResizing]);
 
-  async function loadSession(videoId) {
+  async function loadSession(videoId, options = {}) {
+    const preserveSelection = Boolean(options.preserveSelection);
     try {
       const response = await apiFetch(`/api/session?video_id=${videoId}`);
       if (!response.ok) throw new Error(`加载视频会话失败：${response.status}`);
       const payload = await response.json();
-      const initialSegment = payload.segments[0] ?? null;
+      const selectedSegment =
+        preserveSelection && selectedId != null ? payload.segments.find((segment) => segment.id === selectedId) ?? null : null;
+      const activeSegment =
+        preserveSelection && activeId != null ? payload.segments.find((segment) => segment.id === activeId) ?? null : null;
+      const initialSegment = selectedSegment ?? payload.segments[0] ?? null;
       setSession(payload);
       setSelectedId(initialSegment?.id ?? null);
-      setActiveId(initialSegment?.id ?? null);
+      setActiveId(activeSegment?.id ?? initialSegment?.id ?? null);
       setAnalysisStatus(EMPTY_ANALYSIS_STATUS);
       setSessionError("");
+      const sessionTask = payload.task || payload.video?.active_task || null;
+      if (isTaskRunning(sessionTask)) {
+        syncProcessingState(sessionTask);
+      } else if (processingState.videoId === videoId) {
+        setProcessingState(EMPTY_PROCESSING_STATE);
+      }
     } catch (error) {
       setSessionError(error instanceof Error ? error.message : "加载视频会话失败。");
     }
   }
 
-  async function refreshVideos(selectVideoId = null) {
+  async function refreshVideos(selectVideoId = null, options = {}) {
     const response = await apiFetch("/api/videos");
     if (!response.ok) throw new Error(`刷新视频列表失败：${response.status}`);
     const payload = await response.json();
     setVideos(payload.videos);
-    if (selectVideoId) await loadSession(selectVideoId);
+    const activeTask = (payload.videos ?? []).map((video) => video.active_task).find((task) => isTaskRunning(task)) ?? null;
+    if (activeTask) {
+      syncProcessingState(activeTask);
+    } else if (!selectVideoId) {
+      setProcessingState(EMPTY_PROCESSING_STATE);
+      stopTaskPolling();
+    }
+    if (selectVideoId) await loadSession(selectVideoId, options);
     return payload.videos;
   }
 
@@ -686,6 +839,38 @@ function App() {
       null;
     setActiveNotebookId(nextActiveNotebookId);
     return nextNotebooks;
+  }
+
+  function isVideoProcessing(videoId) {
+    return Boolean(isTaskRunning(getActiveTaskCandidate(videoId)));
+  }
+
+  function actionLabelForVideo(videoId, mode) {
+    const task = getActiveTaskCandidate(videoId);
+    if (!isTaskRunning(task) || task.mode !== mode) {
+      return mode === "translate_only" ? "仅翻译" : "全量";
+    }
+    return mode === "translate_only" ? "翻译中..." : "处理中...";
+  }
+
+  async function loadRuntimeStatus(forceDetect = false) {
+    try {
+      setRuntimeState({ loading: true, error: "" });
+      const response = await apiFetch(forceDetect ? "/api/runtime/detect" : "/api/runtime/status", {
+        method: forceDetect ? "POST" : "GET",
+      });
+      if (!response.ok) throw new Error(`运行时检测失败：${response.status}`);
+      const payload = await response.json();
+      setRuntimeStatus(payload);
+      setRuntimeState({ loading: false, error: "" });
+      return payload;
+    } catch (error) {
+      setRuntimeState({
+        loading: false,
+        error: error instanceof Error ? error.message : "运行时检测失败。",
+      });
+      return null;
+    }
   }
 
   function openNotebooksPanel() {
@@ -1033,6 +1218,7 @@ function App() {
     setSaveState("");
     setConnectionTestState({});
     setShowSettings(true);
+    loadRuntimeStatus();
   }
 
   function closeSettingsPanel() {
@@ -1119,7 +1305,20 @@ function App() {
 
   async function processCurrentVideo(videoId = currentVideo?.id, mode = "full") {
     if (!videoId) return;
-    setProcessingState({ videoId, mode });
+    if (isTaskRunning(getActiveTaskCandidate(videoId))) {
+      const task = getActiveTaskCandidate(videoId);
+      syncProcessingState(task);
+      return;
+    }
+    setProcessingState({
+      taskId: "",
+      videoId,
+      mode,
+      status: "queued",
+      stage: "submitting",
+      message: mode === "translate_only" ? "正在提交翻译任务..." : "正在提交全量任务...",
+      error: "",
+    });
     try {
       const endpoint = mode === "translate_only" ? `/api/videos/${videoId}/translate` : `/api/videos/${videoId}/process`;
       const response = await apiFetch(endpoint, { method: "POST" });
@@ -1127,11 +1326,15 @@ function App() {
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.detail || `${mode === "translate_only" ? "仅翻译失败" : "处理视频失败"}：${response.status}`);
       }
-      await refreshVideos(videoId);
+      const payload = await response.json();
+      const task = payload.task ?? null;
+      if (task) {
+        syncProcessingState(task);
+      }
+      await refreshVideos(currentVideoIdRef.current === videoId ? videoId : null, { preserveSelection: true });
     } catch (error) {
       setSessionError(error instanceof Error ? error.message : mode === "translate_only" ? "仅翻译失败。" : "处理视频失败。");
-    } finally {
-      setProcessingState({ videoId: null, mode: "" });
+      setProcessingState(EMPTY_PROCESSING_STATE);
     }
   }
 
@@ -1363,6 +1566,12 @@ function App() {
       </header>
 
       {sessionError ? <div className="banner error global-banner">{sessionError}</div> : null}
+      {isTaskRunning(processingState) && processingState.message ? (
+        <div className="banner loading global-banner">
+          {processingState.mode === "translate_only" ? "仅翻译" : "全量处理"}：
+          {processingState.message}
+        </div>
+      ) : null}
 
       <main className="workspace">
         <div ref={leftColumnRef} className={`left-column ${isCompactLayout ? "compact" : "resizable"}`} style={leftColumnStyle}>
@@ -1381,17 +1590,17 @@ function App() {
                         type="button"
                         className="ghost-button small"
                         onClick={() => processCurrentVideo(currentVideo.id, "full")}
-                        disabled={processingState.videoId === currentVideo.id}
+                        disabled={isVideoProcessing(currentVideo.id)}
                       >
-                        {processingState.videoId === currentVideo.id && processingState.mode === "full" ? "处理中..." : "全量"}
+                        {actionLabelForVideo(currentVideo.id, "full")}
                       </button>
                       <button
                         type="button"
                         className="ghost-button small"
                         onClick={() => processCurrentVideo(currentVideo.id, "translate_only")}
-                        disabled={!currentVideoRecord?.transcript_json_path || processingState.videoId === currentVideo.id}
+                        disabled={!currentVideoRecord?.transcript_json_path || isVideoProcessing(currentVideo.id)}
                       >
-                        {processingState.videoId === currentVideo.id && processingState.mode === "translate_only" ? "翻译中..." : "仅翻译"}
+                        {actionLabelForVideo(currentVideo.id, "translate_only")}
                       </button>
                     </>
                   ) : null}
@@ -1888,6 +2097,62 @@ function App() {
                 <p className="muted">字幕支持原文、学习语言、双语三种导出；视频当前保留带字幕轨导出，烧录版先关闭。</p>
               </div>
               </article>
+
+              <article className="overlay-card">
+              <div className="insight-card-header">
+                <h3>运行环境检测</h3>
+                <button type="button" className="ghost-button small" onClick={() => loadRuntimeStatus(true)} disabled={runtimeState.loading}>
+                  {runtimeState.loading ? "检测中..." : "重新检测"}
+                </button>
+              </div>
+              {runtimeState.error ? <div className="banner error">{runtimeState.error}</div> : null}
+              {runtimeStatus ? (
+                <div className="runtime-grid">
+                  <div className="runtime-card">
+                    <strong>应用目录</strong>
+                    <p>{runtimeStatus.app_root}</p>
+                    <span>{runtimeStatus.portable_mode ? "当前为同目录便携模式" : "当前为开发/默认模式"}</span>
+                  </div>
+                  <div className="runtime-card">
+                    <strong>FFmpeg</strong>
+                    <p>{runtimeStatus.ffmpeg?.found ? "已找到" : "未找到"}</p>
+                    <span>{runtimeStatus.ffmpeg?.path || runtimeStatus.ffmpeg?.version || "未检测到可用 FFmpeg"}</span>
+                  </div>
+                  <div className="runtime-card">
+                    <strong>模型</strong>
+                    <p>{runtimeStatus.models?.current_model_found ? "当前模型已找到" : "当前模型未找到"}</p>
+                    <span>{runtimeStatus.models?.current_model_path || runtimeStatus.models?.model_root || "未检测到模型目录"}</span>
+                  </div>
+                  <div className="runtime-card">
+                    <strong>GPU</strong>
+                    <p>{runtimeStatus.gpu?.detected ? "可用" : "不可用"}</p>
+                    <span>{runtimeStatus.gpu?.name || runtimeStatus.gpu?.message || "未检测到 NVIDIA GPU"}</span>
+                  </div>
+                  <div className="runtime-card">
+                    <strong>CUDA</strong>
+                    <p>{runtimeStatus.cuda?.available ? "已检测到" : "未检测到"}</p>
+                    <span>{runtimeStatus.cuda?.candidate_dirs?.[0] || "未找到 CUDA 运行时目录"}</span>
+                  </div>
+                  <div className="runtime-card">
+                    <strong>cuDNN</strong>
+                    <p>{runtimeStatus.cudnn?.available ? "已检测到" : "未检测到"}</p>
+                    <span>{runtimeStatus.cudnn?.candidate_files?.[0] || "未找到 cuDNN 动态库"}</span>
+                  </div>
+                  <div className="runtime-card wide">
+                    <strong>Whisper CUDA 初始化</strong>
+                    <p>{runtimeStatus.whisper_cuda?.ready ? "成功" : "失败"}</p>
+                    <span>{runtimeStatus.whisper_cuda?.message || "暂无结果"}</span>
+                  </div>
+                  <div className="runtime-card wide">
+                    <strong>当前实际运行模式</strong>
+                    <p>{runtimeStatus.effective_device} / {runtimeStatus.effective_compute_type}</p>
+                    <span>用于桌面版判断当前应走 CPU 还是 GPU。</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="banner loading">运行时检测信息还没准备好。</div>
+              )}
+              </article>
             </div>
           </div>
         </section>
@@ -1927,17 +2192,17 @@ function App() {
                       type="button"
                       className="primary-button small"
                       onClick={() => processCurrentVideo(video.id, "full")}
-                      disabled={processingState.videoId === video.id}
+                      disabled={isVideoProcessing(video.id)}
                     >
-                      {processingState.videoId === video.id && processingState.mode === "full" ? "处理中..." : "全量"}
+                      {actionLabelForVideo(video.id, "full")}
                     </button>
                     <button
                       type="button"
                       className="ghost-button small"
                       onClick={() => processCurrentVideo(video.id, "translate_only")}
-                      disabled={!video.transcript_json_path || processingState.videoId === video.id}
+                      disabled={!video.transcript_json_path || isVideoProcessing(video.id)}
                     >
-                      {processingState.videoId === video.id && processingState.mode === "translate_only" ? "翻译中..." : "翻译"}
+                      {isTaskRunning(getActiveTaskCandidate(video.id)) && getActiveTaskCandidate(video.id)?.mode === "translate_only" ? "翻译中..." : "翻译"}
                     </button>
                     <button type="button" className="ghost-button small danger-button" onClick={() => deleteVideoItem(video)} disabled={deletingVideoId === video.id}>
                       {deletingVideoId === video.id ? "删除中..." : "删除"}

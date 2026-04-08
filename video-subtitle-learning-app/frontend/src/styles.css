@@ -947,6 +947,41 @@ input[type="checkbox"] {
   justify-content: flex-end;
 }
 
+.runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.runtime-card {
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.runtime-card.wide {
+  grid-column: 1 / -1;
+}
+
+.runtime-card strong,
+.runtime-card p,
+.runtime-card span {
+  display: block;
+}
+
+.runtime-card p {
+  margin: 8px 0 0;
+  color: #fff3df;
+}
+
+.runtime-card span {
+  margin-top: 8px;
+  color: #9ca9c4;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
 .danger-button {
   border-color: rgba(255, 132, 132, 0.24);
   color: #ffd3d3;
@@ -1302,6 +1337,10 @@ input[type="checkbox"] {
   }
 
   .analysis-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-grid {
     grid-template-columns: 1fr;
   }
 

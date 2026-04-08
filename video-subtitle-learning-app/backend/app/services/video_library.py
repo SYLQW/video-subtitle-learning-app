@@ -4,14 +4,18 @@ import json
 from pathlib import Path
 from typing import Any
 
+from backend.app.services.app_paths import (
+    get_demo_video_dir,
+    get_library_video_dir,
+    get_transcripts_dir,
+    get_translations_dir,
+)
 from backend.app.services.database import LIBRARY_VIDEO_DIR, delete_video, get_video, list_videos, upsert_artifact, upsert_video
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PLAYGROUND_ROOT = PROJECT_ROOT.parent
-TEST_VIDEO_DIR = PLAYGROUND_ROOT / "测试视频"
-TRANSCRIPT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "transcripts"
-TRANSLATION_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "translations"
+TEST_VIDEO_DIR = get_demo_video_dir()
+TRANSCRIPT_OUTPUT_DIR = get_transcripts_dir()
+TRANSLATION_OUTPUT_DIR = get_translations_dir()
 
 
 def sync_video_library() -> None:

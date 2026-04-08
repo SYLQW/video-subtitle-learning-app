@@ -5,16 +5,15 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
+from backend.app.services.app_paths import ensure_app_directories, get_db_path, get_library_video_dir
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DATA_DIR = PROJECT_ROOT / "data"
-LIBRARY_VIDEO_DIR = DATA_DIR / "videos"
-DB_PATH = DATA_DIR / "app.sqlite3"
+
+LIBRARY_VIDEO_DIR = get_library_video_dir()
+DB_PATH = get_db_path()
 
 
 def get_connection() -> sqlite3.Connection:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    LIBRARY_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_app_directories()
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")

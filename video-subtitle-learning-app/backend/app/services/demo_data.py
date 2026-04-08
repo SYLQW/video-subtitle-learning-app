@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+from backend.app.services.app_paths import get_analysis_output_dir
 
 
 def get_analysis_cache_path(source_path: str, segment_id: int, model_name: str, segment_text: str) -> Path:
-    analysis_cache_dir = PROJECT_ROOT / "outputs" / "analysis"
+    analysis_cache_dir = get_analysis_output_dir()
     analysis_cache_dir.mkdir(parents=True, exist_ok=True)
     source_stem = Path(source_path).stem
     safe_model = model_name.replace("/", "-")

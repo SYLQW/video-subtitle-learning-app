@@ -5,7 +5,7 @@
   "identifier": "com.sykqw.video-subtitle-learning",
   "build": {
     "beforeDevCommand": "powershell -ExecutionPolicy Bypass -File ./scripts/tauri-dev.ps1",
-    "beforeBuildCommand": "npm run build:web",
+    "beforeBuildCommand": "npm --prefix frontend run build",
     "devUrl": "http://127.0.0.1:5173",
     "frontendDist": "../frontend/dist"
   },
