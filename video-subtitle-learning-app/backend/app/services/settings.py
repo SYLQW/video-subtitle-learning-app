@@ -5,6 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 from backend.app.services.database import get_setting_json, upsert_setting_json
+from backend.app.services.language_support import normalize_lang_code
 from backend.app.services.llm_common import API_STYLE_CHAT
 
 
@@ -32,17 +33,27 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "translation": {
         "provider": "deeplx",
         "deeplx_url": "",
+        "deeplx_use_proxy": True,
+        "deeplx_concurrency": 2,
         "llm_profile_id": "profile-qwen-translation",
-        "source_lang": "EN",
-        "target_lang": "ZH",
+        "source_lang": "AUTO",
+        "learning_lang": "ZH",
+        "native_lang": "ZH",
         "batch_size": 1,
+    },
+    "display": {
+        "mode": "source_learning",
+    },
+    "export": {
+        "subtitle_mode": "bilingual",
+        "video_mode": "soft",
     },
     "analysis": {
         "profile_id": "profile-qwen-analysis",
         "stream": True,
     },
     "transcription": {
-        "model_size": "base.en",
+        "model_size": "base",
         "device": "cuda",
         "compute_type": "float16",
     },
@@ -137,9 +148,27 @@ def _drop_legacy_fields(settings: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_settings(settings: dict[str, Any]) -> dict[str, Any]:
     normalized = _merge_dict(DEFAULT_SETTINGS, settings)
+    translation = normalized["translation"]
+    translation["source_lang"] = normalize_lang_code(translation.get("source_lang"), default="AUTO")
+    translation["learning_lang"] = normalize_lang_code(
+        translation.get("learning_lang") or translation.get("target_lang"),
+        default="ZH",
+    )
+    translation["native_lang"] = normalize_lang_code(translation.get("native_lang"), default="ZH")
+    translation["deeplx_use_proxy"] = bool(translation.get("deeplx_use_proxy", True))
+    translation["deeplx_concurrency"] = max(1, min(8, int(translation.get("deeplx_concurrency") or 2)))
+    transcription = normalized["transcription"]
+    model_size = str(transcription.get("model_size") or "base").strip()
+    if model_size.endswith(".en") and translation["source_lang"] != "EN":
+        model_size = model_size.removesuffix(".en") or "base"
+    transcription["model_size"] = model_size
+    normalized["display"]["mode"] = str(normalized["display"].get("mode") or "source_learning")
+    normalized["export"]["subtitle_mode"] = str(normalized["export"].get("subtitle_mode") or "bilingual")
+    normalized["export"]["video_mode"] = "soft"
     normalized = _migrate_legacy_profiles(normalized)
     normalized = _ensure_selected_profiles(normalized)
     normalized = _drop_legacy_fields(normalized)
+    normalized["translation"].pop("target_lang", None)
     return normalized
 
 

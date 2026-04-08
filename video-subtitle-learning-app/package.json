@@ -1,0 +1,14 @@
+{
+  "name": "video-subtitle-learning-app-shell",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev:web": "npm --prefix frontend run dev -- --host 127.0.0.1 --strictPort",
+    "build:web": "npm --prefix frontend run build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@tauri-apps/cli-win32-x64-msvc": "^2.10.1"
+  }
+}

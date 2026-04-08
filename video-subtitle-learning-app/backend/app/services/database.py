@@ -150,6 +150,31 @@ def get_video(video_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def delete_video(video_id: int) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                videos.id,
+                videos.stem,
+                videos.title,
+                videos.path,
+                videos.source
+            FROM videos
+            WHERE videos.id = ?
+            """,
+            (video_id,),
+        ).fetchone()
+        if not row:
+            return None
+
+        video = dict(row)
+        connection.execute("DELETE FROM analysis_cache WHERE video_stem = ?", (video["stem"],))
+        connection.execute("DELETE FROM artifacts WHERE video_stem = ?", (video["stem"],))
+        connection.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+        return video
+
+
 def upsert_artifact(video_stem: str, **paths: str | None) -> None:
     with get_connection() as connection:
         connection.execute(
@@ -222,4 +247,3 @@ def upsert_analysis_cache(
             """,
             (video_stem, segment_id, model_name, segment_hash, json.dumps(payload, ensure_ascii=False)),
         )
-

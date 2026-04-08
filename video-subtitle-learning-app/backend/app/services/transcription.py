@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -10,6 +14,8 @@ from typing import Any
 
 import srt
 from faster_whisper import WhisperModel
+
+from backend.app.services.language_support import whisper_language
 
 
 @dataclass
@@ -28,6 +34,9 @@ class TranscriptResult:
     language_probability: float | None
     duration_seconds: float | None
     segments: list[TranscriptSegment]
+    runtime_device: str | None = None
+    runtime_compute_type: str | None = None
+    fallback_reason: str | None = None
 
 
 @dataclass
@@ -76,6 +85,46 @@ def _configure_windows_gpu_runtime() -> None:
 
 
 _configure_windows_gpu_runtime()
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+LOCAL_MODEL_ROOT = Path(os.environ.get("VIDEO_SUBTITLE_MODEL_ROOT") or "C:/fw-models")
+
+
+def _huggingface_cache_root() -> Path:
+    custom = os.environ.get("HF_HOME")
+    if custom:
+        return Path(custom).expanduser().resolve() / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _repair_model_cache(model_size: str) -> None:
+    cache_root = _huggingface_cache_root()
+    repo_dir = cache_root / f"models--Systran--faster-whisper-{model_size}"
+    locks_dir = cache_root / ".locks" / f"models--Systran--faster-whisper-{model_size}"
+
+    for incomplete in repo_dir.rglob("*.incomplete") if repo_dir.exists() else []:
+        try:
+            incomplete.unlink()
+        except OSError:
+            pass
+
+    if locks_dir.exists():
+        try:
+            shutil.rmtree(locks_dir)
+        except OSError:
+            for lock_file in locks_dir.rglob("*.lock"):
+                try:
+                    lock_file.unlink()
+                except OSError:
+                    pass
+
+
+def _resolve_model_path(model_size: str) -> str:
+    local_path = LOCAL_MODEL_ROOT / f"faster-whisper-{model_size}"
+    if local_path.exists():
+        required = ["config.json", "tokenizer.json", "vocabulary.txt", "model.bin"]
+        if all((local_path / name).exists() for name in required):
+            return str(local_path)
+    return model_size
 
 
 def _normalize_text(text: str) -> str:
@@ -187,17 +236,122 @@ def _fallback_segments(raw_segments: list[Any]) -> list[TranscriptSegment]:
     return segments
 
 
-def transcribe_video(
+def _resolve_model_size(model_size: str, language: str | None) -> str:
+    resolved = str(model_size or "base").strip()
+    requested_language = whisper_language(language)
+    if resolved.endswith(".en") and requested_language != "en":
+        return resolved.removesuffix(".en") or "base"
+    return resolved
+
+
+def resolve_transcription_runtime(
+    *,
+    device: str,
+    compute_type: str,
+    language: str | None,
+) -> tuple[str, str]:
+    return device, compute_type
+
+
+def _transcript_result_from_dict(payload: dict[str, Any]) -> TranscriptResult:
+    return TranscriptResult(
+        source_path=str(payload["source_path"]),
+        model_size=str(payload["model_size"]),
+        language=payload.get("language"),
+        language_probability=payload.get("language_probability"),
+        duration_seconds=payload.get("duration_seconds"),
+        runtime_device=payload.get("runtime_device"),
+        runtime_compute_type=payload.get("runtime_compute_type"),
+        fallback_reason=payload.get("fallback_reason"),
+        segments=[
+            TranscriptSegment(
+                index=int(segment["index"]),
+                start=float(segment["start"]),
+                end=float(segment["end"]),
+                text=str(segment["text"]),
+            )
+            for segment in payload.get("segments", [])
+        ],
+    )
+
+
+def _format_subprocess_error(completed: subprocess.CompletedProcess[str]) -> str:
+    parts = [f"exit code {completed.returncode}"]
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    if stdout:
+        parts.append(f"stdout: {stdout[-1000:]}")
+    if stderr:
+        parts.append(f"stderr: {stderr[-1000:]}")
+    return "; ".join(parts)
+
+
+def _run_transcription_subprocess(
+    *,
     video_path: str | Path,
-    model_size: str = "small.en",
+    model_size: str,
+    device: str,
+    compute_type: str,
+    beam_size: int,
+    vad_filter: bool,
+    word_timestamps: bool,
+    language: str | None,
+) -> TranscriptResult:
+    request_payload = {
+        "video_path": str(Path(video_path).expanduser().resolve()),
+        "model_size": model_size,
+        "device": device,
+        "compute_type": compute_type,
+        "beam_size": beam_size,
+        "vad_filter": vad_filter,
+        "word_timestamps": word_timestamps,
+        "language": language,
+    }
+
+    with tempfile.TemporaryDirectory(prefix="video-subtitle-transcribe-") as temp_dir:
+        temp_root = Path(temp_dir)
+        request_path = temp_root / "request.json"
+        output_path = temp_root / "result.json"
+        request_path.write_text(json.dumps(request_payload, ensure_ascii=False), encoding="utf-8")
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-X",
+                "utf8",
+                "-m",
+                "backend.app.services.transcription_worker",
+                str(request_path),
+                str(output_path),
+            ],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(_format_subprocess_error(completed))
+        if not output_path.exists():
+            raise RuntimeError("transcription worker finished without writing a result file")
+
+        return _transcript_result_from_dict(json.loads(output_path.read_text(encoding="utf-8")))
+
+
+def _transcribe_video_once(
+    video_path: str | Path,
+    model_size: str = "base",
     device: str = "cuda",
     compute_type: str = "float16",
     beam_size: int = 5,
     vad_filter: bool = True,
     word_timestamps: bool = True,
+    language: str | None = None,
 ) -> TranscriptResult:
     source = Path(video_path).expanduser().resolve()
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    resolved_model_size = _resolve_model_size(model_size, language)
+    _repair_model_cache(resolved_model_size)
+    model = WhisperModel(_resolve_model_path(resolved_model_size), device=device, compute_type=compute_type)
 
     segments_iter, info = model.transcribe(
         str(source),
@@ -205,6 +359,7 @@ def transcribe_video(
         vad_filter=vad_filter,
         word_timestamps=word_timestamps,
         condition_on_previous_text=False,
+        language=whisper_language(language),
     )
 
     raw_segments = list(segments_iter)
@@ -215,12 +370,56 @@ def transcribe_video(
 
     return TranscriptResult(
         source_path=str(source),
-        model_size=model_size,
+        model_size=resolved_model_size,
         language=info.language,
         language_probability=info.language_probability,
         duration_seconds=getattr(info, "duration", None),
         segments=segments,
+        runtime_device=device,
+        runtime_compute_type=compute_type,
     )
+
+
+def transcribe_video(
+    video_path: str | Path,
+    model_size: str = "base",
+    device: str = "cuda",
+    compute_type: str = "float16",
+    beam_size: int = 5,
+    vad_filter: bool = True,
+    word_timestamps: bool = True,
+    language: str | None = None,
+) -> TranscriptResult:
+    requested_device = str(device or "cpu").strip().lower()
+    requested_compute_type = str(compute_type or "int8").strip().lower()
+
+    try:
+        return _run_transcription_subprocess(
+            video_path=video_path,
+            model_size=model_size,
+            device=requested_device,
+            compute_type=requested_compute_type,
+            beam_size=beam_size,
+            vad_filter=vad_filter,
+            word_timestamps=word_timestamps,
+            language=language,
+        )
+    except Exception as exc:
+        if requested_device == "cpu":
+            raise RuntimeError(f"CPU transcription failed: {exc}") from exc
+
+        fallback = _run_transcription_subprocess(
+            video_path=video_path,
+            model_size=model_size,
+            device="cpu",
+            compute_type="int8",
+            beam_size=beam_size,
+            vad_filter=vad_filter,
+            word_timestamps=word_timestamps,
+            language=language,
+        )
+        fallback.fallback_reason = f"GPU transcription failed and fell back to CPU: {exc}"
+        return fallback
 
 
 def transcript_to_srt(result: TranscriptResult) -> str:
@@ -243,6 +442,9 @@ def transcript_to_dict(result: TranscriptResult) -> dict[str, Any]:
         "language": result.language,
         "language_probability": result.language_probability,
         "duration_seconds": result.duration_seconds,
+        "runtime_device": result.runtime_device,
+        "runtime_compute_type": result.runtime_compute_type,
+        "fallback_reason": result.fallback_reason,
         "segments": [asdict(segment) for segment in result.segments],
     }
 
@@ -253,7 +455,7 @@ def save_transcript_outputs(result: TranscriptResult, output_dir: str | Path) ->
 
     stem = Path(result.source_path).stem
     json_path = output_path / f"{stem}.transcript.json"
-    srt_path = output_path / f"{stem}.en.srt"
+    srt_path = output_path / f"{stem}.source.srt"
 
     json_path.write_text(
         json.dumps(transcript_to_dict(result), ensure_ascii=False, indent=2),

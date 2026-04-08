@@ -220,7 +220,14 @@ input[type="checkbox"] {
   display: flex;
   justify-content: space-between;
   gap: 24px;
-  align-items: flex-start;
+  align-items: center;
+}
+
+.brand-lockup {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
 }
 
 .eyebrow,
@@ -232,6 +239,10 @@ input[type="checkbox"] {
   color: #f2b266;
 }
 
+.brand-lockup .eyebrow {
+  margin: 0;
+}
+
 .topbar h1,
 .panel-header h2,
 .overlay-header h2 {
@@ -241,7 +252,8 @@ input[type="checkbox"] {
 }
 
 .topbar h1 {
-  font-size: clamp(1.9rem, 2vw + 1rem, 3rem);
+  font-size: clamp(1.6rem, 1.2vw + 1rem, 2.25rem);
+  line-height: 1.1;
 }
 
 .topbar-actions,
@@ -370,6 +382,12 @@ input[type="checkbox"] {
   transition: transform 160ms ease, background 180ms ease, border-color 180ms ease;
 }
 
+.ghost-button.active-pill {
+  border-color: rgba(240, 178, 102, 0.56);
+  background: rgba(240, 178, 102, 0.14);
+  color: #ffe5bf;
+}
+
 .ghost-button {
   background: rgba(255, 255, 255, 0.06);
   color: #f4efe6;
@@ -397,6 +415,78 @@ input[type="checkbox"] {
   min-height: 0;
   height: 100%;
   padding: 20px;
+}
+
+.video-header-copy {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.video-panel-header {
+  display: grid;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.video-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.single-line-title {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-header-actions {
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.video-meta-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.video-tools {
+  display: grid;
+  gap: 12px;
+  padding: 0 20px 20px;
+}
+
+.export-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.tool-label,
+.panel-caption,
+.tool-feedback {
+  color: #9ca9c4;
+  font-size: 0.84rem;
+}
+
+.tool-label {
+  min-width: 72px;
+}
+
+.overlay-header-note {
+  margin: 8px 0 0;
+  color: #9ca9c4;
+  font-size: 0.84rem;
 }
 
 .video-player,
@@ -503,6 +593,37 @@ input[type="checkbox"] {
   margin: 0;
   color: #ffddb4;
   line-height: 1.65;
+}
+
+.selected-line,
+.subtitle-line {
+  margin: 10px 0 0;
+  line-height: 1.65;
+}
+
+.selected-line {
+  font-size: 1.02rem;
+}
+
+.selected-line.source,
+.subtitle-line.source {
+  color: #f5f7fb;
+}
+
+.selected-line.learning,
+.subtitle-line.learning {
+  color: #c2d3ff;
+}
+
+.selected-line-label,
+.subtitle-line-label {
+  display: inline-block;
+  min-width: 4.8rem;
+  margin-right: 10px;
+  color: #f2b266;
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .analysis-grid {
@@ -676,18 +797,8 @@ input[type="checkbox"] {
   color: #f2b266;
 }
 
-.subtitle-en,
-.subtitle-zh {
-  margin: 10px 0 0;
-  line-height: 1.6;
-}
-
-.subtitle-en {
-  font-size: 1rem;
-}
-
-.subtitle-zh {
-  color: #c2d3ff;
+.subtitle-line {
+  font-size: 0.98rem;
 }
 
 .banner {
@@ -753,6 +864,19 @@ input[type="checkbox"] {
   display: grid;
   gap: 8px;
   margin-bottom: 14px;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 14px;
+  color: #dbe6ff;
+}
+
+.checkbox-field input {
+  width: 16px;
+  height: 16px;
 }
 
 .compact-field {
@@ -887,6 +1011,10 @@ input[type="checkbox"] {
     inset: 16px;
     width: auto;
   }
+
+  .video-header-actions {
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 760px) {
@@ -898,7 +1026,6 @@ input[type="checkbox"] {
   .panel-header,
   .overlay-header,
   .video-item,
-  .overlay-footer,
   .profile-toolbar {
     flex-direction: column;
   }
@@ -906,4 +1033,26 @@ input[type="checkbox"] {
   .analysis-grid {
     grid-template-columns: 1fr;
   }
+
+  .brand-lockup,
+  .video-meta-strip,
+  .video-header-actions {
+    align-items: flex-start;
+  }
+
+  .video-header-top {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .single-line-title {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+}
+.compact-chip {
+  padding: 6px 10px;
+  font-size: 0.76rem;
 }

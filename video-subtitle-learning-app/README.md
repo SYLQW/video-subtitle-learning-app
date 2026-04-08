@@ -8,6 +8,12 @@ This workspace is the initial scaffold for the desktop English-learning subtitle
 - GPU runtime validated for `faster-whisper`
 - Base backend dependencies installed
 - Frontend and backend folders prepared
+- Tauri dev shell scaffold added
+
+## Architecture notes
+
+- Desktop runtime strategy: [docs/desktop-runtime-strategy.md](/C:/Users/SYKQW/OneDrive/文档/Playground/video-subtitle-learning-app/docs/desktop-runtime-strategy.md)
+- Multilingual subtitle and export design: [docs/multilingual-subtitle-design.md](/C:/Users/SYKQW/OneDrive/文档/Playground/video-subtitle-learning-app/docs/multilingual-subtitle-design.md)
 
 ## Folder structure
 

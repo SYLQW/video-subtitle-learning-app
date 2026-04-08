@@ -1,5 +1,6 @@
 ﻿import { startTransition, useEffect, useRef, useState } from "react";
 
+import { apiFetch, apiUrl } from "./lib/api";
 function formatTime(seconds) {
   const safe = Number.isFinite(seconds) ? Math.floor(seconds) : 0;
   const minutes = Math.floor(safe / 60);
@@ -217,6 +218,94 @@ function SelectMenu({ value, options, onChange, placeholder = "请选择" }) {
   );
 }
 
+const LANGUAGE_OPTIONS = [
+  { value: "AUTO", label: "自动检测" },
+  { value: "EN", label: "English" },
+  { value: "ZH", label: "中文" },
+  { value: "JA", label: "日本语" },
+  { value: "KO", label: "한국어" },
+  { value: "FR", label: "Français" },
+  { value: "DE", label: "Deutsch" },
+  { value: "ES", label: "Español" },
+  { value: "RU", label: "Русский" },
+  { value: "IT", label: "Italiano" },
+  { value: "PT", label: "Português" },
+];
+
+const DISPLAY_MODE_OPTIONS = [
+  { value: "source_learning", label: "原文 + 学习语言" },
+  { value: "learning_source", label: "学习语言 + 原文" },
+  { value: "source_only", label: "只看原文" },
+  { value: "learning_only", label: "只看学习语言" },
+];
+
+const SUBTITLE_EXPORT_OPTIONS = [
+  { value: "source", label: "原文字幕" },
+  { value: "learning", label: "学习语言字幕" },
+  { value: "bilingual", label: "双语字幕" },
+];
+
+const VIDEO_EXPORT_OPTIONS = [{ value: "soft", label: "带字幕轨视频" }];
+
+const PLAYER_SUBTITLE_OPTIONS = [
+  { value: "off", label: "关闭字幕" },
+  { value: "source", label: "原文字幕" },
+  { value: "learning", label: "学习语言字幕" },
+  { value: "bilingual", label: "双语字幕" },
+];
+
+function languageLabel(code) {
+  const normalized = String(code ?? "").trim().toUpperCase();
+  return LANGUAGE_OPTIONS.find((option) => option.value === normalized)?.label ?? (normalized || "未设置");
+}
+
+function getSegmentTexts(segment) {
+  const sourceText = segment?.source_text || segment?.en || "";
+  const learningText = segment?.learning_text || segment?.zh || "";
+  return { sourceText, learningText };
+}
+
+function getDisplayedSubtitleLines(segment, mode) {
+  const { sourceText, learningText } = getSegmentTexts(segment);
+  const safeLearning = learningText || sourceText;
+
+  if (!sourceText && !safeLearning) {
+    return [];
+  }
+
+  switch (mode) {
+    case "source_only":
+      return sourceText ? [{ kind: "source", text: sourceText }] : [];
+    case "learning_only":
+      return safeLearning ? [{ kind: "learning", text: safeLearning }] : [];
+    case "learning_source":
+      return [
+        safeLearning ? { kind: "learning", text: safeLearning } : null,
+        sourceText && sourceText !== safeLearning ? { kind: "source", text: sourceText } : null,
+      ].filter(Boolean);
+    case "source_learning":
+    default:
+      return [
+        sourceText ? { kind: "source", text: sourceText } : null,
+        safeLearning && safeLearning !== sourceText ? { kind: "learning", text: safeLearning } : null,
+      ].filter(Boolean);
+  }
+}
+
+function parseFilenameFromDisposition(value) {
+  if (!value) return "";
+  const utf8Match = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const plainMatch = value.match(/filename="?([^";]+)"?/i);
+  return plainMatch ? plainMatch[1] : "";
+}
+
 function App() {
   const [videos, setVideos] = useState([]);
   const [settings, setSettings] = useState(null);
@@ -233,11 +322,15 @@ function App() {
   const [showLibrary, setShowLibrary] = useState(false);
   const [saveState, setSaveState] = useState("");
   const [uploadState, setUploadState] = useState("");
-  const [processingVideoId, setProcessingVideoId] = useState(null);
+  const [exportState, setExportState] = useState("");
+  const [processingState, setProcessingState] = useState({ videoId: null, mode: "" });
+  const [deletingVideoId, setDeletingVideoId] = useState(null);
   const [connectionTestState, setConnectionTestState] = useState({});
   const [isCompactLayout, setIsCompactLayout] = useState(() => window.innerWidth <= 1180);
   const [videoPanelHeight, setVideoPanelHeight] = useState(420);
   const [isResizing, setIsResizing] = useState(false);
+  const [playerSubtitleMode, setPlayerSubtitleMode] = useState("off");
+  const [showVideoTools, setShowVideoTools] = useState(false);
 
   const videoRef = useRef(null);
   const leftColumnRef = useRef(null);
@@ -262,6 +355,15 @@ function App() {
   const currentVideo = session?.video ?? null;
   const selectedSegment = session?.segments.find((segment) => segment.id === selectedId) ?? null;
   const currentVideoRecord = videos.find((video) => currentVideo && video.id === currentVideo.id) ?? null;
+  const sourceLanguageCode = session?.source_lang || settings?.translation?.source_lang || "AUTO";
+  const learningLanguageCode = session?.learning_lang || settings?.translation?.learning_lang || "ZH";
+  const nativeLanguageCode = session?.native_lang || settings?.translation?.native_lang || "ZH";
+  const displayMode = settings?.display?.mode ?? "source_learning";
+  const exportSubtitleMode = settings?.export?.subtitle_mode ?? "bilingual";
+  const exportVideoMode = settings?.export?.video_mode ?? "soft";
+  const sourceLanguageText = languageLabel(sourceLanguageCode);
+  const learningLanguageText = languageLabel(learningLanguageCode);
+  const nativeLanguageText = languageLabel(nativeLanguageCode);
   const analysisCacheKey = session && selectedId ? `${session.video.id}:${selectedId}:${analysisModel}` : "";
   const analysisPayload = analysisCacheKey ? analysisByKey[analysisCacheKey] : null;
   const analysis = analysisPayload?.analysis ?? null;
@@ -276,11 +378,16 @@ function App() {
     { value: "responses", label: "Responses API" },
   ];
   const profileOptions = draftProfiles.map((profile) => ({ value: profile.id, label: profile.name }));
+  const availablePlayerSubtitleModes = PLAYER_SUBTITLE_OPTIONS.filter((option) => {
+    if (option.value === "off") return true;
+    if (option.value === "source") return Boolean(session?.has_transcript);
+    return Boolean(session?.has_translation);
+  });
 
   function getVideoHeightBounds() {
     const totalHeight = leftColumnRef.current?.getBoundingClientRect().height ?? window.innerHeight - 140;
     const minHeight = 300;
-    const minAnalysisHeight = 112;
+    const minAnalysisHeight = 72;
     const maxHeight = Math.max(minHeight, totalHeight - minAnalysisHeight - 14);
     return { minHeight, maxHeight };
   }
@@ -288,7 +395,7 @@ function App() {
   useEffect(() => {
     async function bootstrap() {
       try {
-        const [settingsResponse, videosResponse] = await Promise.all([fetch("/api/settings"), fetch("/api/videos")]);
+        const [settingsResponse, videosResponse] = await Promise.all([apiFetch("/api/settings"), apiFetch("/api/videos")]);
         if (!settingsResponse.ok || !videosResponse.ok) throw new Error("初始化应用失败。");
         const settingsPayload = await settingsResponse.json();
         const videosPayload = await videosResponse.json();
@@ -324,9 +431,34 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!session) return;
+    if (session.has_translation) {
+      setPlayerSubtitleMode(exportSubtitleMode);
+      return;
+    }
+    setPlayerSubtitleMode(session.has_transcript ? "source" : "off");
+  }, [exportSubtitleMode, session]);
+
+  useEffect(() => {
     if (!activeId || !followPlayback || isUserReviewing) return;
     subtitleRefs.current[activeId]?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [activeId, followPlayback, isUserReviewing]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const syncTracks = () => {
+      const tracks = Array.from(video.textTracks ?? []);
+      for (const track of tracks) {
+        track.mode = track.language === playerSubtitleMode ? "showing" : "disabled";
+      }
+    };
+
+    syncTracks();
+    video.addEventListener("loadedmetadata", syncTracks);
+    return () => video.removeEventListener("loadedmetadata", syncTracks);
+  }, [playerSubtitleMode, session]);
 
   useEffect(() => {
     if (!session || !selectedId || !settings || !session.has_translation) return;
@@ -342,7 +474,7 @@ function App() {
 
     async function streamAnalysis() {
       try {
-        const response = await fetch(`/api/videos/${session.video.id}/analysis/stream?segment_id=${selectedId}&model=${encodeURIComponent(analysisModel)}`, {
+        const response = await apiFetch(`/api/videos/${session.video.id}/analysis/stream?segment_id=${selectedId}&model=${encodeURIComponent(analysisModel)}`, {
           signal: controller.signal,
         });
         if (!response.ok || !response.body) throw new Error(`流式解析失败：${response.status}`);
@@ -417,7 +549,7 @@ function App() {
 
   async function loadSession(videoId) {
     try {
-      const response = await fetch(`/api/session?video_id=${videoId}`);
+      const response = await apiFetch(`/api/session?video_id=${videoId}`);
       if (!response.ok) throw new Error(`加载视频会话失败：${response.status}`);
       const payload = await response.json();
       const initialSegment = payload.segments[0] ?? null;
@@ -432,11 +564,43 @@ function App() {
   }
 
   async function refreshVideos(selectVideoId = null) {
-    const response = await fetch("/api/videos");
+    const response = await apiFetch("/api/videos");
     if (!response.ok) throw new Error(`刷新视频列表失败：${response.status}`);
     const payload = await response.json();
     setVideos(payload.videos);
     if (selectVideoId) await loadSession(selectVideoId);
+    return payload.videos;
+  }
+
+  async function deleteVideoItem(video) {
+    if (!video) return;
+    const shouldDelete = window.confirm(`确定删除这个视频吗？\n\n${video.title}`);
+    if (!shouldDelete) return;
+
+    setDeletingVideoId(video.id);
+    try {
+      const response = await apiFetch(`/api/videos/${video.id}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `删除视频失败：${response.status}`);
+
+      const remainingVideos = await refreshVideos();
+      setUploadState(`已删除：${video.title}`);
+      if (currentVideo?.id === video.id) {
+        const nextVideo = remainingVideos[0] ?? null;
+        if (nextVideo) {
+          await loadSession(nextVideo.id);
+        } else {
+          setSession(null);
+          setSelectedId(null);
+          setActiveId(null);
+          setAnalysisStatus({ loading: false, message: "", streamText: "", error: "" });
+        }
+      }
+    } catch (error) {
+      setSessionError(error instanceof Error ? error.message : "删除视频失败。");
+    } finally {
+      setDeletingVideoId(null);
+    }
   }
 
   function markManualReview() {
@@ -576,7 +740,7 @@ function App() {
       [profile.id]: { status: "loading", message: "正在测试连接..." },
     }));
     try {
-      const response = await fetch("/api/llm/test", {
+      const response = await apiFetch("/api/llm/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(profile),
@@ -605,7 +769,7 @@ function App() {
   async function saveSettingsToServer() {
     try {
       setSaveState("保存中...");
-      const response = await fetch("/api/settings", {
+      const response = await apiFetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(draftSettings),
@@ -621,20 +785,21 @@ function App() {
     }
   }
 
-  async function processCurrentVideo(videoId = currentVideo?.id) {
+  async function processCurrentVideo(videoId = currentVideo?.id, mode = "full") {
     if (!videoId) return;
-    setProcessingVideoId(videoId);
+    setProcessingState({ videoId, mode });
     try {
-      const response = await fetch(`/api/videos/${videoId}/process`, { method: "POST" });
+      const endpoint = mode === "translate_only" ? `/api/videos/${videoId}/translate` : `/api/videos/${videoId}/process`;
+      const response = await apiFetch(endpoint, { method: "POST" });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.detail || `处理视频失败：${response.status}`);
+        throw new Error(payload.detail || `${mode === "translate_only" ? "仅翻译失败" : "处理视频失败"}：${response.status}`);
       }
       await refreshVideos(videoId);
     } catch (error) {
-      setSessionError(error instanceof Error ? error.message : "处理视频失败。");
+      setSessionError(error instanceof Error ? error.message : mode === "translate_only" ? "仅翻译失败。" : "处理视频失败。");
     } finally {
-      setProcessingVideoId(null);
+      setProcessingState({ videoId: null, mode: "" });
     }
   }
 
@@ -645,7 +810,7 @@ function App() {
     const formData = new FormData();
     formData.append("file", file);
     try {
-      const response = await fetch("/api/videos/upload", { method: "POST", body: formData });
+      const response = await apiFetch("/api/videos/upload", { method: "POST", body: formData });
       if (!response.ok) throw new Error(`上传失败：${response.status}`);
       const payload = await response.json();
       setUploadState("已添加到视频库。");
@@ -657,7 +822,63 @@ function App() {
     }
   }
 
-  const leftColumnStyle = !isCompactLayout ? { gridTemplateRows: `${videoPanelHeight}px 14px minmax(260px, 1fr)` } : undefined;
+  function lineLabel(kind) {
+    return kind === "source" ? sourceLanguageText : learningLanguageText;
+  }
+
+  function renderSegmentLines(segment, mode, scope) {
+    return getDisplayedSubtitleLines(segment, mode).map((line) => (
+      <p key={`${scope}-${line.kind}-${line.text}`} className={`${scope}-line ${line.kind}`}>
+        <span className={`${scope}-line-label`}>{lineLabel(line.kind)}</span>
+        <span>{line.text}</span>
+      </p>
+    ));
+  }
+
+  async function downloadExport(path, fallbackName) {
+    try {
+      setExportState("正在导出...");
+      const response = await apiFetch(path);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || `导出失败：${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition");
+      const filename = parseFilenameFromDisposition(disposition) || fallbackName;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setExportState(`已导出 ${filename}`);
+      setTimeout(() => setExportState(""), 2200);
+    } catch (error) {
+      setExportState(error instanceof Error ? error.message : "导出失败。");
+    }
+  }
+
+  async function exportSubtitle(mode) {
+    if (!currentVideo) return;
+    await downloadExport(
+      `/api/videos/${currentVideo.id}/exports/subtitles?mode=${encodeURIComponent(mode)}`,
+      `${currentVideo.stem}.${mode}.srt`,
+    );
+  }
+
+  async function exportVideoAsset(videoMode = "soft") {
+    if (!currentVideo) return;
+    await downloadExport(
+      `/api/videos/${currentVideo.id}/exports/video?subtitle_mode=${encodeURIComponent(exportSubtitleMode)}&video_mode=${encodeURIComponent(videoMode)}`,
+      `${currentVideo.stem}.${exportSubtitleMode}.${videoMode}.mp4`,
+    );
+  }
+
+  const leftColumnStyle = !isCompactLayout ? { gridTemplateRows: `${videoPanelHeight}px 14px minmax(72px, 1fr)` } : undefined;
 
   const renderAnalysisCards = (payload, isStreaming = false) => (
     <div className={`analysis-grid ${isStreaming ? "streaming-grid" : ""}`}>
@@ -728,7 +949,7 @@ function App() {
       <div className="ambient ambient-right" />
 
       <header className="topbar">
-        <div>
+        <div className="brand-lockup">
           <p className="eyebrow">English Learning Studio</p>
           <h1>视频字幕学习台</h1>
         </div>
@@ -736,6 +957,8 @@ function App() {
           <button type="button" className="ghost-button" onClick={() => setShowLibrary((value) => !value)}>视频库</button>
           <button type="button" className="ghost-button" onClick={() => (showSettings ? closeSettingsPanel() : openSettingsPanel())}>设置</button>
           <span className="chip chip-soft">实时翻译: {activeTranslationLabel}</span>
+          <span className="chip chip-soft">{sourceLanguageText} → {learningLanguageText}</span>
+          <span className="chip chip-soft">解析: {nativeLanguageText}</span>
           <span className="chip chip-strong">{analysisModel}</span>
         </div>
       </header>
@@ -745,24 +968,110 @@ function App() {
       <main className="workspace">
         <div ref={leftColumnRef} className={`left-column ${isCompactLayout ? "compact" : "resizable"}`} style={leftColumnStyle}>
           <section className="panel panel-video">
-            <div className="panel-header">
-              <div>
+            <div className="panel-header video-panel-header">
+              <div className="video-header-top">
                 <p className="panel-label">Video</p>
-                <h2>{session?.title ?? "加载视频中..."}</h2>
-              </div>
-              <div className="panel-header-actions">
-                <span className="chip chip-soft">{session ? `${session.segments.length} 条字幕` : "准备中"}</span>
-                {currentVideo ? (
-                  <button type="button" className="ghost-button small" onClick={() => processCurrentVideo(currentVideo.id)} disabled={processingVideoId === currentVideo.id}>
-                    {processingVideoId === currentVideo.id ? "处理中..." : currentVideoRecord?.bilingual_json_path ? "重新生成字幕" : "处理视频"}
+                <div className="panel-header-actions video-header-actions">
+                  <div className="video-meta-strip">
+                    <span className="chip chip-soft compact-chip">{session ? `${session.segments.length} 条字幕` : "准备中"}</span>
+                    <span className="chip chip-soft compact-chip">{sourceLanguageText} → {learningLanguageText}</span>
+                  </div>
+                  {currentVideo ? (
+                    <>
+                      <button
+                        type="button"
+                        className="ghost-button small"
+                        onClick={() => processCurrentVideo(currentVideo.id, "full")}
+                        disabled={processingState.videoId === currentVideo.id}
+                      >
+                        {processingState.videoId === currentVideo.id && processingState.mode === "full" ? "处理中..." : "全量"}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-button small"
+                        onClick={() => processCurrentVideo(currentVideo.id, "translate_only")}
+                        disabled={!currentVideoRecord?.transcript_json_path || processingState.videoId === currentVideo.id}
+                      >
+                        {processingState.videoId === currentVideo.id && processingState.mode === "translate_only" ? "翻译中..." : "仅翻译"}
+                      </button>
+                    </>
+                  ) : null}
+                  <button type="button" className={`ghost-button small ${showVideoTools ? "active-pill" : ""}`} onClick={() => setShowVideoTools((current) => !current)}>
+                    {showVideoTools ? "收起工具" : "展开工具"}
                   </button>
-                ) : null}
+                </div>
+              </div>
+              <div className="video-header-copy">
+                <h2 className="single-line-title" title={session?.title ?? "加载视频中..."}>{session?.title ?? "加载视频中..."}</h2>
               </div>
             </div>
 
             <div className="video-stage">
-              {session ? <video ref={videoRef} className="video-player" src={session.video_url} controls onTimeUpdate={handleTimeUpdate} /> : <div className="video-placeholder">加载视频中...</div>}
+              {session ? (
+                <video ref={videoRef} className="video-player" src={apiUrl(session.video_url)} controls onTimeUpdate={handleTimeUpdate}>
+                  {session.has_transcript ? (
+                    <track
+                      key={`${session.video.id}-source`}
+                      kind="subtitles"
+                      label={`${sourceLanguageText} 字幕`}
+                      srcLang="source"
+                      src={apiUrl(`/api/videos/${session.video.id}/tracks/source.vtt`)}
+                    />
+                  ) : null}
+                  {session.has_translation ? (
+                    <track
+                      key={`${session.video.id}-learning`}
+                      kind="subtitles"
+                      label={`${learningLanguageText} 字幕`}
+                      srcLang="learning"
+                      src={apiUrl(`/api/videos/${session.video.id}/tracks/learning.vtt`)}
+                    />
+                  ) : null}
+                  {session.has_translation ? (
+                    <track
+                      key={`${session.video.id}-bilingual`}
+                      kind="subtitles"
+                      label="双语字幕"
+                      srcLang="bilingual"
+                      src={apiUrl(`/api/videos/${session.video.id}/tracks/bilingual.vtt`)}
+                    />
+                  ) : null}
+                </video>
+              ) : (
+                <div className="video-placeholder">加载视频中...</div>
+              )}
             </div>
+
+            {showVideoTools ? (
+              <div className="video-tools">
+                <div className="export-group">
+                  <span className="tool-label">播放字幕</span>
+                  {availablePlayerSubtitleModes.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={`ghost-button small ${playerSubtitleMode === option.value ? "active-pill" : ""}`}
+                      onClick={() => setPlayerSubtitleMode(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="export-group">
+                  <span className="tool-label">字幕导出</span>
+                  <button type="button" className="ghost-button small" disabled={!session?.has_transcript} onClick={() => exportSubtitle("source")}>导出原文</button>
+                  <button type="button" className="ghost-button small" disabled={!session?.has_translation} onClick={() => exportSubtitle("learning")}>导出学习语言</button>
+                  <button type="button" className="ghost-button small" disabled={!session?.has_translation} onClick={() => exportSubtitle("bilingual")}>导出双语</button>
+                </div>
+                <div className="export-group">
+                  <span className="tool-label">视频导出</span>
+                  <button type="button" className="ghost-button small" disabled={!session?.has_transcript || (exportSubtitleMode !== "source" && !session?.has_translation)} onClick={() => exportVideoAsset("soft")}>带字幕轨视频</button>
+                  <span className="chip chip-soft compact-chip">当前导出: {SUBTITLE_EXPORT_OPTIONS.find((item) => item.value === exportSubtitleMode)?.label ?? exportSubtitleMode}</span>
+                  <span className="chip chip-soft compact-chip">默认方式: {VIDEO_EXPORT_OPTIONS.find((item) => item.value === exportVideoMode)?.label ?? exportVideoMode}</span>
+                </div>
+                {exportState ? <div className="tool-feedback">{exportState}</div> : null}
+              </div>
+            ) : null}
           </section>
 
           {!isCompactLayout ? (
@@ -793,8 +1102,7 @@ function App() {
                       <span>{formatTime(selectedSegment.start)} - {formatTime(selectedSegment.end)}</span>
                       <span>ID {selectedSegment.id}</span>
                     </div>
-                    <p className="selected-en">{selectedSegment.en}</p>
-                    <p className="selected-zh">{selectedSegment.zh}</p>
+                    {renderSegmentLines(selectedSegment, "source_learning", "selected")}
                   </div>
 
                   {analysisStatus.loading ? (
@@ -821,6 +1129,7 @@ function App() {
             <div>
               <p className="panel-label">Subtitle Flow</p>
               <h2>字幕总览</h2>
+              <span className="panel-caption">{DISPLAY_MODE_OPTIONS.find((item) => item.value === displayMode)?.label ?? displayMode}</span>
             </div>
             <label className="toggle-row">
               <input type="checkbox" checked={followPlayback} onChange={(event) => setFollowPlayback(event.target.checked)} />
@@ -849,8 +1158,7 @@ function App() {
                       <div className="subtitle-timing">{formatTime(segment.start)}</div>
                       <div className="subtitle-index">#{segment.id}</div>
                     </div>
-                    <p className="subtitle-en">{segment.en}</p>
-                    <p className="subtitle-zh">{segment.zh}</p>
+                    {renderSegmentLines(segment, displayMode, "subtitle")}
                   </button>
                 );
               })
@@ -867,8 +1175,12 @@ function App() {
             <div>
               <p className="panel-label">Settings</p>
               <h2>翻译与模型配置</h2>
+              {saveState ? <p className="overlay-header-note">{saveState}</p> : null}
             </div>
-            <button type="button" className="ghost-button" onClick={closeSettingsPanel}>关闭</button>
+            <div className="overlay-header-actions">
+              <button type="button" className="primary-button" onClick={saveSettingsToServer}>保存设置</button>
+              <button type="button" className="ghost-button" onClick={closeSettingsPanel}>关闭</button>
+            </div>
           </div>
 
           <div className="overlay-scroll-region">
@@ -886,6 +1198,59 @@ function App() {
               <label className="field">
                 <span>DeepLX URL</span>
                 <input value={draftSettings.translation.deeplx_url} onChange={(event) => updateDraftSetting("translation", "deeplx_url", event.target.value)} placeholder="https://api.deeplx.org/..." />
+              </label>
+              <label className="checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draftSettings.translation.deeplx_use_proxy)}
+                  onChange={(event) => updateDraftSetting("translation", "deeplx_use_proxy", event.target.checked)}
+                />
+                <span>DeepLX 使用系统代理</span>
+              </label>
+              <label className="field">
+                <span>DeepLX 并发请求数</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="8"
+                  value={draftSettings.translation.deeplx_concurrency}
+                  onChange={(event) => updateDraftSetting("translation", "deeplx_concurrency", Number(event.target.value || 1))}
+                />
+                <small className="field-help">代理不稳定时建议先设为 `1` 或 `2`。</small>
+              </label>
+              <label className="field">
+                <span>源语言</span>
+                <SelectMenu
+                  value={draftSettings.translation.source_lang}
+                  options={LANGUAGE_OPTIONS}
+                  onChange={(nextValue) => updateDraftSetting("translation", "source_lang", nextValue)}
+                />
+              </label>
+              <label className="field">
+                <span>学习目标语言</span>
+                <SelectMenu
+                  value={draftSettings.translation.learning_lang}
+                  options={LANGUAGE_OPTIONS.filter((option) => option.value !== "AUTO")}
+                  onChange={(nextValue) => updateDraftSetting("translation", "learning_lang", nextValue)}
+                />
+              </label>
+              <label className="field">
+                <span>用户母语 / 解析语言</span>
+                <SelectMenu
+                  value={draftSettings.translation.native_lang}
+                  options={LANGUAGE_OPTIONS.filter((option) => option.value !== "AUTO")}
+                  onChange={(nextValue) => updateDraftSetting("translation", "native_lang", nextValue)}
+                />
+              </label>
+              <label className="field">
+                <span>批量翻译句数</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="12"
+                  value={draftSettings.translation.batch_size}
+                  onChange={(event) => updateDraftSetting("translation", "batch_size", Number(event.target.value || 1))}
+                />
               </label>
               <div className="profile-toolbar">
                 <label className="field compact-field">
@@ -1055,12 +1420,47 @@ function App() {
                 <span>Whisper 模型</span>
                 <input value={draftSettings.transcription.model_size} onChange={(event) => updateDraftSetting("transcription", "model_size", event.target.value)} />
               </label>
+              <label className="field">
+                <span>设备</span>
+                <input value={draftSettings.transcription.device} onChange={(event) => updateDraftSetting("transcription", "device", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>计算精度</span>
+                <input value={draftSettings.transcription.compute_type} onChange={(event) => updateDraftSetting("transcription", "compute_type", event.target.value)} />
+              </label>
               </article>
-            </div>
 
-            <div className="overlay-footer">
-              <span className="muted">{saveState}</span>
-              <button type="button" className="primary-button" onClick={saveSettingsToServer}>保存设置</button>
+              <article className="overlay-card">
+              <h3>显示与导出</h3>
+              <label className="field">
+                <span>字幕显示模式</span>
+                <SelectMenu
+                  value={draftSettings.display.mode}
+                  options={DISPLAY_MODE_OPTIONS}
+                  onChange={(nextValue) => updateDraftSetting("display", "mode", nextValue)}
+                />
+              </label>
+              <label className="field">
+                <span>视频导出字幕轨</span>
+                <SelectMenu
+                  value={draftSettings.export.subtitle_mode}
+                  options={SUBTITLE_EXPORT_OPTIONS}
+                  onChange={(nextValue) => updateDraftSetting("export", "subtitle_mode", nextValue)}
+                />
+              </label>
+              <label className="field">
+                <span>默认视频导出方式</span>
+                <SelectMenu
+                  value={draftSettings.export.video_mode}
+                  options={VIDEO_EXPORT_OPTIONS}
+                  onChange={(nextValue) => updateDraftSetting("export", "video_mode", nextValue)}
+                />
+              </label>
+              <div className="banner loading">
+                <strong>当前逻辑</strong>
+                <p className="muted">字幕支持原文、学习语言、双语三种导出；视频当前保留带字幕轨导出，烧录版先关闭。</p>
+              </div>
+              </article>
             </div>
           </div>
         </section>
@@ -1096,8 +1496,24 @@ function App() {
                   </div>
                   <div className="video-actions">
                     <button type="button" className="ghost-button small" onClick={() => loadSession(video.id)}>切换</button>
-                    <button type="button" className="primary-button small" onClick={() => processCurrentVideo(video.id)} disabled={processingVideoId === video.id}>
-                      {processingVideoId === video.id ? "处理中..." : "处理"}
+                    <button
+                      type="button"
+                      className="primary-button small"
+                      onClick={() => processCurrentVideo(video.id, "full")}
+                      disabled={processingState.videoId === video.id}
+                    >
+                      {processingState.videoId === video.id && processingState.mode === "full" ? "处理中..." : "全量"}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-button small"
+                      onClick={() => processCurrentVideo(video.id, "translate_only")}
+                      disabled={!video.transcript_json_path || processingState.videoId === video.id}
+                    >
+                      {processingState.videoId === video.id && processingState.mode === "translate_only" ? "翻译中..." : "翻译"}
+                    </button>
+                    <button type="button" className="ghost-button small danger-button" onClick={() => deleteVideoItem(video)} disabled={deletingVideoId === video.id}>
+                      {deletingVideoId === video.id ? "删除中..." : "删除"}
                     </button>
                   </div>
                 </article>

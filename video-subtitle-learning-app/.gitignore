@@ -13,3 +13,8 @@ node_modules/
 .env
 .env.local
 data/*.sqlite3
+data/videos/
+outputs/
+src-tauri/target/
+*.mp4
+models/

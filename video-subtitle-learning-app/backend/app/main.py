@@ -8,21 +8,31 @@ from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 
 from backend.app.services.analysis import analyze_sentence, stream_sentence_analysis
 from backend.app.services.database import get_analysis_cache, init_db, upsert_analysis_cache
+from backend.app.services.exporting import ensure_subtitle_export, export_video_with_subtitles
+from backend.app.services.language_support import normalize_lang_code
 from backend.app.services.llm_common import OpenAICompatibleConfig, post_chat_json, resolve_endpoint
 from backend.app.services.settings import get_app_settings, get_llm_profile, save_app_settings
-from backend.app.services.transcription import TranscriptResult, TranscriptSegment, save_transcript_outputs, transcribe_video
+from backend.app.services.transcription import (
+    TranscriptResult,
+    TranscriptSegment,
+    resolve_transcription_runtime,
+    save_transcript_outputs,
+    transcribe_video,
+)
 from backend.app.services.translation import (
     DeepLXConfig,
     TranslationConfig,
+    compose_vtt,
     save_bilingual_outputs,
     translate_segments_with_deeplx,
     translate_segments_with_llm,
 )
 from backend.app.services.video_library import (
+    delete_video_item,
     get_video_session,
     list_library_items,
     save_uploaded_video,
@@ -87,7 +97,7 @@ def _analysis_cache_key(video_stem: str, segment_id: int, model_name: str, segme
     )
 
 
-def _build_translation_config(settings: dict[str, Any]) -> tuple[str, Any]:
+def _build_translation_config(settings: dict[str, Any], *, source_lang: str, learning_lang: str) -> tuple[str, Any]:
     translation = settings["translation"]
     provider = translation["provider"]
     if provider == "deeplx":
@@ -95,8 +105,11 @@ def _build_translation_config(settings: dict[str, Any]) -> tuple[str, Any]:
             provider,
             DeepLXConfig(
                 url=translation["deeplx_url"],
-                source_lang=translation["source_lang"],
-                target_lang=translation["target_lang"],
+                source_lang=source_lang,
+                target_lang=learning_lang,
+                trust_env=bool(translation.get("deeplx_use_proxy", True)),
+                max_workers=int(translation.get("deeplx_concurrency", 2)),
+                retries=2,
             ),
         )
 
@@ -119,6 +132,156 @@ def _ensure_bilingual_payload(video_id: int) -> tuple[dict[str, Any], dict[str, 
         raise HTTPException(status_code=400, detail="This video has not been translated yet.")
     video = session["video"]
     return video, _load_bilingual_payload(video["bilingual_json_path"])
+
+
+def _resolve_source_lang(settings: dict[str, Any], transcript: TranscriptResult) -> str:
+    configured = normalize_lang_code(settings["translation"].get("source_lang"), default="AUTO")
+    if configured != "AUTO":
+        return configured
+    return normalize_lang_code(transcript.language, default="AUTO")
+
+
+def _translate_and_save_video(
+    *,
+    video: dict[str, Any],
+    transcript: TranscriptResult,
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    translation_settings = settings["translation"]
+    source_lang = _resolve_source_lang(settings, transcript)
+    learning_lang = normalize_lang_code(translation_settings.get("learning_lang"), default="ZH")
+    native_lang = normalize_lang_code(translation_settings.get("native_lang"), default="ZH")
+
+    provider, provider_config = _build_translation_config(
+        settings,
+        source_lang=source_lang,
+        learning_lang=learning_lang,
+    )
+    if provider == "deeplx":
+        bilingual_segments = translate_segments_with_deeplx(transcript, provider_config)
+    else:
+        bilingual_segments = translate_segments_with_llm(
+            transcript,
+            provider_config,
+            source_lang=source_lang,
+            learning_lang=learning_lang,
+            batch_size=int(settings["translation"]["batch_size"]),
+        )
+
+    bilingual_json_path, learning_srt_path, bilingual_srt_path = save_bilingual_outputs(
+        transcript,
+        bilingual_segments,
+        PROJECT_ROOT / "outputs" / "translations",
+        source_lang=source_lang,
+        learning_lang=learning_lang,
+        native_lang=native_lang,
+    )
+    sync_artifacts_for_stem(Path(video["path"]).stem)
+    return {
+        "provider": provider,
+        "source_lang": source_lang,
+        "learning_lang": learning_lang,
+        "native_lang": native_lang,
+        "bilingual_json_path": str(bilingual_json_path),
+        "learning_srt_path": str(learning_srt_path),
+        "zh_srt_path": str(learning_srt_path),
+        "bilingual_srt_path": str(bilingual_srt_path),
+    }
+
+
+def _source_srt_output_path(video: dict[str, Any]) -> str:
+    return str(PROJECT_ROOT / "outputs" / "transcripts" / f"{video['stem']}.source.srt")
+
+
+def _build_export_segments(
+    transcript: TranscriptResult | None,
+    bilingual_payload: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if bilingual_payload:
+        return list(bilingual_payload.get("bilingual_segments", []))
+    if not transcript:
+        return []
+    return [
+        {
+            "id": segment.index,
+            "start": segment.start,
+            "end": segment.end,
+            "source_text": segment.text,
+            "learning_text": "",
+            "en": segment.text,
+            "zh": "",
+        }
+        for segment in transcript.segments
+    ]
+
+
+def _download_name(video: dict[str, Any], export_path: Path) -> str:
+    return export_path.name if export_path.name.startswith(f"{video['stem']}.") else f"{video['stem']}.{export_path.name}"
+
+
+def _segment_target_text(segment: dict[str, Any]) -> str:
+    return str(segment.get("learning_text") or segment.get("zh") or segment.get("source_text") or segment.get("en") or "")
+
+
+def _segment_source_text(segment: dict[str, Any]) -> str:
+    return str(segment.get("source_text") or segment.get("en") or "")
+
+
+def _segment_languages(payload: dict[str, Any], settings: dict[str, Any]) -> tuple[str, str, str]:
+    translation_settings = settings["translation"]
+    source_lang = payload.get("source_lang") or translation_settings.get("source_lang") or "AUTO"
+    learning_lang = payload.get("learning_lang") or translation_settings.get("learning_lang") or "ZH"
+    native_lang = payload.get("native_lang") or translation_settings.get("native_lang") or "ZH"
+    return source_lang, learning_lang, native_lang
+
+
+def _select_analysis_focus(
+    *,
+    segment: dict[str, Any],
+    source_lang: str,
+    learning_lang: str,
+    native_lang: str,
+) -> tuple[str, str, str, str]:
+    source_text = _segment_source_text(segment)
+    translated_text = _segment_target_text(segment)
+    normalized_source_lang = normalize_lang_code(source_lang, default="AUTO")
+    normalized_learning_lang = normalize_lang_code(learning_lang, default="ZH")
+    normalized_native_lang = normalize_lang_code(native_lang, default="ZH")
+
+    # Most common learning flow: video is in the foreign language and the learner
+    # wants native-language explanations. In that case analysis should stay on the
+    # original subtitle text instead of the translated Chinese line.
+    if source_text and normalized_source_lang != normalized_native_lang and normalized_learning_lang == normalized_native_lang:
+        return source_text, normalized_source_lang, translated_text, normalized_learning_lang
+
+    if translated_text:
+        reference_text = source_text if translated_text != source_text else ""
+        reference_lang = normalized_source_lang if reference_text else normalized_learning_lang
+        return translated_text, normalized_learning_lang, reference_text, reference_lang
+
+    return source_text, normalized_source_lang, translated_text, normalized_learning_lang
+
+
+def _analysis_context(
+    segments: list[dict[str, Any]],
+    index: int,
+    *,
+    source_lang: str,
+    learning_lang: str,
+    native_lang: str,
+) -> tuple[str, str]:
+    def study_text_for(item: dict[str, Any]) -> str:
+        study_text, _, _, _ = _select_analysis_focus(
+            segment=item,
+            source_lang=source_lang,
+            learning_lang=learning_lang,
+            native_lang=native_lang,
+        )
+        return study_text
+
+    previous_text = study_text_for(segments[index - 1]) if index > 0 else ""
+    next_text = study_text_for(segments[index + 1]) if index + 1 < len(segments) else ""
+    return previous_text, next_text
 
 
 @app.get("/health")
@@ -191,6 +354,15 @@ async def upload_video(file: UploadFile = File(...)) -> dict[str, Any]:
     return {"video": video}
 
 
+@app.delete("/api/videos/{video_id}")
+def remove_video(video_id: int) -> dict[str, Any]:
+    try:
+        deleted = delete_video_item(video_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"deleted": deleted}
+
+
 @app.get("/api/session")
 def read_session(video_id: int | None = Query(default=None)) -> dict[str, Any]:
     sync_video_library()
@@ -215,46 +387,86 @@ def stream_video(video_id: int) -> FileResponse:
 @app.post("/api/videos/{video_id}/process")
 def process_video(video_id: int) -> dict[str, Any]:
     settings = get_app_settings()
-    session = get_video_session(video_id)
+    try:
+        session = get_video_session(video_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     video = session["video"]
     transcription_settings = settings["transcription"]
+    translation_settings = settings["translation"]
+    resolved_device, resolved_compute_type = resolve_transcription_runtime(
+        device=transcription_settings["device"],
+        compute_type=transcription_settings["compute_type"],
+        language=translation_settings.get("source_lang"),
+    )
 
     transcript = transcribe_video(
         video["path"],
         model_size=transcription_settings["model_size"],
-        device=transcription_settings["device"],
-        compute_type=transcription_settings["compute_type"],
+        device=resolved_device,
+        compute_type=resolved_compute_type,
+        language=translation_settings.get("source_lang"),
     )
-    transcript_json_path, en_srt_path = save_transcript_outputs(
+    actual_device = transcript.runtime_device or resolved_device
+    actual_compute_type = transcript.runtime_compute_type or resolved_compute_type
+    transcript_json_path, source_srt_path = save_transcript_outputs(
         transcript,
         PROJECT_ROOT / "outputs" / "transcripts",
     )
-
-    provider, provider_config = _build_translation_config(settings)
-    if provider == "deeplx":
-        bilingual_segments = translate_segments_with_deeplx(transcript, provider_config)
-    else:
-        bilingual_segments = translate_segments_with_llm(
-            transcript,
-            provider_config,
-            batch_size=int(settings["translation"]["batch_size"]),
-        )
-
-    bilingual_json_path, zh_srt_path, bilingual_srt_path = save_bilingual_outputs(
-        transcript,
-        bilingual_segments,
-        PROJECT_ROOT / "outputs" / "translations",
-    )
-    sync_artifacts_for_stem(Path(video["path"]).stem)
+    translation_result = _translate_and_save_video(video=video, transcript=transcript, settings=settings)
 
     return {
         "video_id": video_id,
-        "provider": provider,
+        "mode": "full",
+        "provider": translation_result["provider"],
+        "source_lang": translation_result["source_lang"],
+        "learning_lang": translation_result["learning_lang"],
+        "native_lang": translation_result["native_lang"],
+        "runtime_device": actual_device,
+        "runtime_compute_type": actual_compute_type,
+        "runtime_fallback_reason": transcript.fallback_reason,
         "transcript_json_path": str(transcript_json_path),
-        "en_srt_path": str(en_srt_path),
-        "bilingual_json_path": str(bilingual_json_path),
-        "zh_srt_path": str(zh_srt_path),
-        "bilingual_srt_path": str(bilingual_srt_path),
+        "source_srt_path": str(source_srt_path),
+        "en_srt_path": str(source_srt_path),
+        "bilingual_json_path": translation_result["bilingual_json_path"],
+        "learning_srt_path": translation_result["learning_srt_path"],
+        "zh_srt_path": translation_result["zh_srt_path"],
+        "bilingual_srt_path": translation_result["bilingual_srt_path"],
+    }
+
+
+@app.post("/api/videos/{video_id}/translate")
+def translate_video(video_id: int) -> dict[str, Any]:
+    settings = get_app_settings()
+    try:
+        session = get_video_session(video_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    video = session["video"]
+    if not video.get("transcript_json_path"):
+        raise HTTPException(status_code=400, detail="This video has no transcript yet. Please run full processing first.")
+
+    transcript_path = Path(video["transcript_json_path"])
+    if not transcript_path.exists():
+        raise HTTPException(status_code=400, detail="The saved transcript file is missing. Please run full processing first.")
+
+    transcript = _load_transcript(str(transcript_path))
+    translation_result = _translate_and_save_video(video=video, transcript=transcript, settings=settings)
+
+    return {
+        "video_id": video_id,
+        "mode": "translate_only",
+        "provider": translation_result["provider"],
+        "source_lang": translation_result["source_lang"],
+        "learning_lang": translation_result["learning_lang"],
+        "native_lang": translation_result["native_lang"],
+        "transcript_json_path": str(transcript_path),
+        "source_srt_path": _source_srt_output_path(video),
+        "en_srt_path": _source_srt_output_path(video),
+        "bilingual_json_path": translation_result["bilingual_json_path"],
+        "learning_srt_path": translation_result["learning_srt_path"],
+        "zh_srt_path": translation_result["zh_srt_path"],
+        "bilingual_srt_path": translation_result["bilingual_srt_path"],
     }
 
 
@@ -277,14 +489,27 @@ def sentence_analysis(
         raise HTTPException(status_code=404, detail=f"Segment id {segment_id} not found.") from exc
 
     segment = segments[index]
-    previous_text = segments[index - 1]["en"] if index > 0 else ""
-    next_text = segments[index + 1]["en"] if index + 1 < len(segments) else ""
+    source_text = _segment_source_text(segment)
+    source_lang, learning_lang, native_lang = _segment_languages(payload, settings)
+    study_text, study_lang, reference_text, reference_lang = _select_analysis_focus(
+        segment=segment,
+        source_lang=source_lang,
+        learning_lang=learning_lang,
+        native_lang=native_lang,
+    )
+    previous_text, next_text = _analysis_context(
+        segments,
+        index,
+        source_lang=source_lang,
+        learning_lang=learning_lang,
+        native_lang=native_lang,
+    )
 
     video_stem, cache_segment_id, cache_model, segment_hash = _analysis_cache_key(
         video["stem"],
         segment_id,
         resolved_model,
-        segment["en"],
+        f"{study_lang}\n{reference_lang}\n{study_text}\n{reference_text}",
     )
     cached = get_analysis_cache(
         video_stem=video_stem,
@@ -296,12 +521,17 @@ def sentence_analysis(
         return {"segment": segment, "analysis": cached, "model": resolved_model, "cached": True}
 
     analysis_result = analyze_sentence(
-        text=segment["en"],
-        existing_translation=segment["zh"],
+        study_text=study_text,
+        reference_translation=reference_text,
+        source_text=source_text,
         model=resolved_model,
         base_url=analysis_profile["base_url"],
         api_key=analysis_profile["api_key"],
         api_style=analysis_profile.get("api_style", "chat_completions"),
+        study_lang=study_lang,
+        reference_lang=reference_lang,
+        native_lang=native_lang,
+        source_lang=source_lang,
         previous_text=previous_text,
         next_text=next_text,
     )
@@ -334,14 +564,27 @@ def sentence_analysis_stream(
         raise HTTPException(status_code=404, detail=f"Segment id {segment_id} not found.") from exc
 
     segment = segments[index]
-    previous_text = segments[index - 1]["en"] if index > 0 else ""
-    next_text = segments[index + 1]["en"] if index + 1 < len(segments) else ""
+    source_text = _segment_source_text(segment)
+    source_lang, learning_lang, native_lang = _segment_languages(payload, settings)
+    study_text, study_lang, reference_text, reference_lang = _select_analysis_focus(
+        segment=segment,
+        source_lang=source_lang,
+        learning_lang=learning_lang,
+        native_lang=native_lang,
+    )
+    previous_text, next_text = _analysis_context(
+        segments,
+        index,
+        source_lang=source_lang,
+        learning_lang=learning_lang,
+        native_lang=native_lang,
+    )
 
     video_stem, cache_segment_id, cache_model, segment_hash = _analysis_cache_key(
         video["stem"],
         segment_id,
         resolved_model,
-        segment["en"],
+        f"{study_lang}\n{reference_lang}\n{study_text}\n{reference_text}",
     )
     cached = get_analysis_cache(
         video_stem=video_stem,
@@ -364,12 +607,17 @@ def sentence_analysis_stream(
         try:
             yield emit("status", {"message": "正在调用模型生成句子解析..."})
             for delta in stream_sentence_analysis(
-                text=segment["en"],
-                existing_translation=segment["zh"],
+                study_text=study_text,
+                reference_translation=reference_text,
+                source_text=source_text,
                 model=resolved_model,
                 base_url=analysis_profile["base_url"],
                 api_key=analysis_profile["api_key"],
                 api_style=analysis_profile.get("api_style", "chat_completions"),
+                study_lang=study_lang,
+                reference_lang=reference_lang,
+                native_lang=native_lang,
+                source_lang=source_lang,
                 previous_text=previous_text,
                 next_text=next_text,
             ):
@@ -389,3 +637,92 @@ def sentence_analysis_stream(
             yield emit("error", {"message": str(exc)})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/videos/{video_id}/exports/subtitles")
+def export_subtitles(
+    video_id: int,
+    mode: str = Query(default="bilingual"),
+) -> FileResponse:
+    normalized_mode = str(mode or "bilingual").strip().lower()
+    if normalized_mode not in {"source", "learning", "bilingual"}:
+        raise HTTPException(status_code=400, detail="Unsupported subtitle export mode.")
+
+    session = get_video_session(video_id)
+    video = session["video"]
+    transcript = _load_transcript(video["transcript_json_path"]) if video.get("transcript_json_path") else None
+    payload = _load_bilingual_payload(video["bilingual_json_path"]) if video.get("bilingual_json_path") else None
+
+    if normalized_mode != "source" and not payload:
+        raise HTTPException(status_code=400, detail="This video has no translated subtitles yet.")
+
+    segments = _build_export_segments(transcript, payload)
+    if not segments:
+        raise HTTPException(status_code=400, detail="This video has no subtitles to export yet.")
+
+    export_path = ensure_subtitle_export(video["stem"], segments, normalized_mode)
+    return FileResponse(
+        export_path,
+        media_type="application/x-subrip",
+        filename=_download_name(video, export_path),
+    )
+
+
+@app.get("/api/videos/{video_id}/tracks/{mode}.vtt")
+def video_subtitle_track(video_id: int, mode: str) -> PlainTextResponse:
+    normalized_mode = str(mode or "bilingual").strip().lower()
+    if normalized_mode not in {"source", "learning", "bilingual"}:
+        raise HTTPException(status_code=400, detail="Unsupported subtitle track mode.")
+
+    session = get_video_session(video_id)
+    video = session["video"]
+    transcript = _load_transcript(video["transcript_json_path"]) if video.get("transcript_json_path") else None
+    payload = _load_bilingual_payload(video["bilingual_json_path"]) if video.get("bilingual_json_path") else None
+
+    if normalized_mode != "source" and not payload:
+        raise HTTPException(status_code=400, detail="This video has no translated subtitles yet.")
+
+    segments = _build_export_segments(transcript, payload)
+    if not segments:
+        raise HTTPException(status_code=400, detail="This video has no subtitles yet.")
+
+    return PlainTextResponse(compose_vtt(segments, normalized_mode), media_type="text/vtt")
+
+
+@app.get("/api/videos/{video_id}/exports/video")
+def export_video(
+    video_id: int,
+    subtitle_mode: str = Query(default="bilingual"),
+    video_mode: str = Query(default="soft"),
+) -> FileResponse:
+    normalized_subtitle_mode = str(subtitle_mode or "bilingual").strip().lower()
+    normalized_video_mode = str(video_mode or "soft").strip().lower()
+    if normalized_subtitle_mode not in {"source", "learning", "bilingual"}:
+        raise HTTPException(status_code=400, detail="Unsupported subtitle mode.")
+    if normalized_video_mode not in {"soft", "burned"}:
+        raise HTTPException(status_code=400, detail="Unsupported video export mode.")
+
+    session = get_video_session(video_id)
+    video = session["video"]
+    transcript = _load_transcript(video["transcript_json_path"]) if video.get("transcript_json_path") else None
+    payload = _load_bilingual_payload(video["bilingual_json_path"]) if video.get("bilingual_json_path") else None
+
+    if normalized_subtitle_mode != "source" and not payload:
+        raise HTTPException(status_code=400, detail="This video has no translated subtitles yet.")
+
+    segments = _build_export_segments(transcript, payload)
+    if not segments:
+        raise HTTPException(status_code=400, detail="This video has no subtitles to export yet.")
+
+    export_path = export_video_with_subtitles(
+        source_video_path=video["path"],
+        stem=video["stem"],
+        bilingual_segments=segments,
+        subtitle_mode=normalized_subtitle_mode,
+        video_mode=normalized_video_mode,
+    )
+    return FileResponse(
+        export_path,
+        media_type="video/mp4",
+        filename=_download_name(video, export_path),
+    )
