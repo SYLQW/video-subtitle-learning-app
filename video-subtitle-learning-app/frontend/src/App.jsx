@@ -254,9 +254,49 @@ const PLAYER_SUBTITLE_OPTIONS = [
   { value: "bilingual", label: "双语字幕" },
 ];
 
+const NOTEBOOK_TYPE_OPTIONS = [
+  { value: "word", label: "词语册" },
+  { value: "sentence", label: "句子册" },
+];
+
+const NOTEBOOK_EXPORT_OPTIONS = [
+  { value: "json", label: "JSON" },
+  { value: "csv", label: "CSV" },
+  { value: "md", label: "Markdown" },
+];
+
+const EMPTY_ANALYSIS_STATUS = { loading: false, message: "", streamText: "", error: "" };
+
+function createCollectionDialogState() {
+  return {
+    open: false,
+    type: "word",
+    payload: null,
+    selectedNotebookId: "",
+    newNotebookName: "",
+    saving: false,
+    message: "",
+    error: "",
+  };
+}
+
+function createNotebookDialogState() {
+  return {
+    open: false,
+    type: "word",
+    name: "",
+    saving: false,
+    error: "",
+  };
+}
+
 function languageLabel(code) {
   const normalized = String(code ?? "").trim().toUpperCase();
   return LANGUAGE_OPTIONS.find((option) => option.value === normalized)?.label ?? (normalized || "未设置");
+}
+
+function notebookTypeLabel(type) {
+  return NOTEBOOK_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? type;
 }
 
 function getSegmentTexts(segment) {
@@ -320,11 +360,18 @@ function App() {
   const [isUserReviewing, setIsUserReviewing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showLibrary, setShowLibrary] = useState(false);
+  const [showNotebooks, setShowNotebooks] = useState(false);
   const [saveState, setSaveState] = useState("");
   const [uploadState, setUploadState] = useState("");
   const [exportState, setExportState] = useState("");
   const [processingState, setProcessingState] = useState({ videoId: null, mode: "" });
   const [deletingVideoId, setDeletingVideoId] = useState(null);
+  const [notebooks, setNotebooks] = useState([]);
+  const [activeNotebookId, setActiveNotebookId] = useState(null);
+  const [notebookEntries, setNotebookEntries] = useState({});
+  const [notebookState, setNotebookState] = useState({ loading: false, saving: false, message: "", error: "" });
+  const [collectionDialog, setCollectionDialog] = useState(createCollectionDialogState);
+  const [notebookDialog, setNotebookDialog] = useState(createNotebookDialogState);
   const [connectionTestState, setConnectionTestState] = useState({});
   const [isCompactLayout, setIsCompactLayout] = useState(() => window.innerWidth <= 1180);
   const [videoPanelHeight, setVideoPanelHeight] = useState(420);
@@ -383,6 +430,12 @@ function App() {
     if (option.value === "source") return Boolean(session?.has_transcript);
     return Boolean(session?.has_translation);
   });
+  const wordNotebooks = notebooks.filter((notebook) => notebook.type === "word");
+  const sentenceNotebooks = notebooks.filter((notebook) => notebook.type === "sentence");
+  const activeNotebook = notebooks.find((notebook) => notebook.id === activeNotebookId) ?? null;
+  const activeNotebookEntries = activeNotebookId ? notebookEntries[activeNotebookId]?.items ?? [] : [];
+  const activeNotebookLoading = activeNotebookId ? notebookEntries[activeNotebookId]?.loading : false;
+  const collectionCandidates = notebooks.filter((notebook) => notebook.type === collectionDialog.type);
 
   function getVideoHeightBounds() {
     const totalHeight = leftColumnRef.current?.getBoundingClientRect().height ?? window.innerHeight - 140;
@@ -395,13 +448,20 @@ function App() {
   useEffect(() => {
     async function bootstrap() {
       try {
-        const [settingsResponse, videosResponse] = await Promise.all([apiFetch("/api/settings"), apiFetch("/api/videos")]);
-        if (!settingsResponse.ok || !videosResponse.ok) throw new Error("初始化应用失败。");
+        const [settingsResponse, videosResponse, notebooksResponse] = await Promise.all([
+          apiFetch("/api/settings"),
+          apiFetch("/api/videos"),
+          apiFetch("/api/notebooks"),
+        ]);
+        if (!settingsResponse.ok || !videosResponse.ok || !notebooksResponse.ok) throw new Error("初始化应用失败。");
         const settingsPayload = await settingsResponse.json();
         const videosPayload = await videosResponse.json();
+        const notebooksPayload = await notebooksResponse.json();
         setSettings(settingsPayload);
         setDraftSettings(cloneSettings(settingsPayload));
         setVideos(videosPayload.videos);
+        setNotebooks(notebooksPayload.notebooks ?? []);
+        setActiveNotebookId((current) => current ?? notebooksPayload.notebooks?.[0]?.id ?? null);
         if (videosPayload.videos.length > 0) await loadSession(videosPayload.videos[0].id);
       } catch (error) {
         setSessionError(error instanceof Error ? error.message : "初始化应用失败。");
@@ -461,9 +521,50 @@ function App() {
   }, [playerSubtitleMode, session]);
 
   useEffect(() => {
+    if (!activeNotebookId) return undefined;
+    let cancelled = false;
+
+    async function loadEntries() {
+      const notebook = notebooks.find((item) => item.id === activeNotebookId);
+      if (!notebook) return;
+      setNotebookEntries((current) => ({
+        ...current,
+        [activeNotebookId]: { loading: true, items: current[activeNotebookId]?.items ?? [] },
+      }));
+
+      try {
+        const endpoint = notebook.type === "word" ? `/api/notebooks/${activeNotebookId}/words` : `/api/notebooks/${activeNotebookId}/sentences`;
+        const response = await apiFetch(endpoint);
+        if (!response.ok) throw new Error(`加载收集册失败：${response.status}`);
+        const payload = await response.json();
+        if (cancelled) return;
+        setNotebookEntries((current) => ({
+          ...current,
+          [activeNotebookId]: { loading: false, items: payload.entries ?? [] },
+        }));
+      } catch (error) {
+        if (cancelled) return;
+        setNotebookEntries((current) => ({
+          ...current,
+          [activeNotebookId]: { loading: false, items: current[activeNotebookId]?.items ?? [] },
+        }));
+        setNotebookState((current) => ({
+          ...current,
+          error: error instanceof Error ? error.message : "加载收集册失败。",
+        }));
+      }
+    }
+
+    loadEntries();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeNotebookId, notebooks]);
+
+  useEffect(() => {
     if (!session || !selectedId || !settings || !session.has_translation) return;
     if (analysisByKey[analysisCacheKey]) {
-      setAnalysisStatus({ loading: false, message: "", streamText: "", error: "" });
+      setAnalysisStatus(EMPTY_ANALYSIS_STATUS);
       return;
     }
 
@@ -501,7 +602,7 @@ function App() {
               setAnalysisStatus((current) => ({ ...current, loading: true, streamText: current.streamText + (parsed.text ?? "") }));
             } else if (payload.event === "complete") {
               setAnalysisByKey((current) => ({ ...current, [analysisCacheKey]: parsed }));
-              setAnalysisStatus({ loading: false, message: parsed.cached ? "已命中缓存。" : "解析完成。", streamText: "", error: "" });
+              setAnalysisStatus({ ...EMPTY_ANALYSIS_STATUS, message: parsed.cached ? "已命中缓存。" : "解析完成。" });
             } else if (payload.event === "error") {
               throw new Error(parsed.message || "流式解析失败。");
             }
@@ -556,7 +657,7 @@ function App() {
       setSession(payload);
       setSelectedId(initialSegment?.id ?? null);
       setActiveId(initialSegment?.id ?? null);
-      setAnalysisStatus({ loading: false, message: "", streamText: "", error: "" });
+      setAnalysisStatus(EMPTY_ANALYSIS_STATUS);
       setSessionError("");
     } catch (error) {
       setSessionError(error instanceof Error ? error.message : "加载视频会话失败。");
@@ -570,6 +671,237 @@ function App() {
     setVideos(payload.videos);
     if (selectVideoId) await loadSession(selectVideoId);
     return payload.videos;
+  }
+
+  async function refreshNotebooks(preferredNotebookId = activeNotebookId) {
+    const response = await apiFetch("/api/notebooks");
+    if (!response.ok) throw new Error(`刷新收集册失败：${response.status}`);
+    const payload = await response.json();
+    const nextNotebooks = payload.notebooks ?? [];
+    setNotebooks(nextNotebooks);
+    const nextActiveNotebookId =
+      nextNotebooks.find((item) => item.id === preferredNotebookId)?.id ??
+      nextNotebooks.find((item) => item.id === activeNotebookId)?.id ??
+      nextNotebooks[0]?.id ??
+      null;
+    setActiveNotebookId(nextActiveNotebookId);
+    return nextNotebooks;
+  }
+
+  function openNotebooksPanel() {
+    setNotebookState({ loading: false, saving: false, message: "", error: "" });
+    setShowNotebooks(true);
+  }
+
+  function closeNotebooksPanel() {
+    setNotebookState((current) => ({ ...current, error: "", message: "" }));
+    setShowNotebooks(false);
+  }
+
+  function openNotebookDialog(type) {
+    setNotebookDialog({
+      open: true,
+      type,
+      name: type === "word" ? "我的词语册" : "我的句子册",
+      saving: false,
+      error: "",
+    });
+  }
+
+  function closeNotebookDialog() {
+    setNotebookDialog(createNotebookDialogState());
+  }
+
+  async function createNotebookItem(type, explicitName = "") {
+    const notebookName = explicitName.trim();
+    if (!notebookName) return null;
+
+    setNotebookState((current) => ({ ...current, saving: true, message: "", error: "" }));
+    try {
+      const response = await apiFetch("/api/notebooks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type,
+          name: notebookName,
+          source_lang: sourceLanguageCode,
+          learning_lang: learningLanguageCode,
+          native_lang: nativeLanguageCode,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `创建收集册失败：${response.status}`);
+      await refreshNotebooks(payload.notebook?.id);
+      setNotebookState((current) => ({ ...current, saving: false, message: `已创建${notebookName}` }));
+      return payload.notebook ?? null;
+    } catch (error) {
+      setNotebookState((current) => ({
+        ...current,
+        saving: false,
+        error: error instanceof Error ? error.message : "创建收集册失败。",
+      }));
+      return null;
+    }
+  }
+
+  async function submitNotebookDialog() {
+    setNotebookDialog((current) => ({ ...current, saving: true, error: "" }));
+    const created = await createNotebookItem(notebookDialog.type, notebookDialog.name || "");
+    if (!created?.id) {
+      setNotebookDialog((current) => ({
+        ...current,
+        saving: false,
+        error: current.name.trim() ? "创建收集册失败。" : "请输入收集册名称。",
+      }));
+      return;
+    }
+    closeNotebookDialog();
+  }
+
+  async function renameNotebookItem(notebook) {
+    if (!notebook) return;
+    const nextName = window.prompt("请输入新的收集册名称", notebook.name)?.trim() || "";
+    if (!nextName || nextName === notebook.name) return;
+
+    setNotebookState((current) => ({ ...current, saving: true, message: "", error: "" }));
+    try {
+      const response = await apiFetch(`/api/notebooks/${notebook.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: nextName }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `重命名失败：${response.status}`);
+      await refreshNotebooks(notebook.id);
+      setNotebookState((current) => ({ ...current, saving: false, message: `已重命名为 ${nextName}` }));
+    } catch (error) {
+      setNotebookState((current) => ({
+        ...current,
+        saving: false,
+        error: error instanceof Error ? error.message : "重命名失败。",
+      }));
+    }
+  }
+
+  async function deleteNotebookItem(notebook) {
+    if (!notebook) return;
+    const shouldDelete = window.confirm(`确定删除这个${notebookTypeLabel(notebook.type)}吗？\n\n${notebook.name}`);
+    if (!shouldDelete) return;
+
+    setNotebookState((current) => ({ ...current, saving: true, message: "", error: "" }));
+    try {
+      const response = await apiFetch(`/api/notebooks/${notebook.id}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `删除收集册失败：${response.status}`);
+      const nextNotebooks = await refreshNotebooks();
+      if (!nextNotebooks.length) {
+        setNotebookEntries({});
+      }
+      setNotebookState((current) => ({ ...current, saving: false, message: `已删除 ${notebook.name}` }));
+    } catch (error) {
+      setNotebookState((current) => ({
+        ...current,
+        saving: false,
+        error: error instanceof Error ? error.message : "删除收集册失败。",
+      }));
+    }
+  }
+
+  function openCollectionDialog(type, payload, preferredNotebookId = "") {
+    if (!payload) return;
+    const typeCandidates = notebooks.filter((notebook) => notebook.type === type);
+    const fallbackNotebookId = preferredNotebookId || typeCandidates[0]?.id || "";
+    setCollectionDialog({
+      open: true,
+      type,
+      payload,
+      selectedNotebookId: String(fallbackNotebookId || ""),
+      newNotebookName: "",
+      saving: false,
+      message: "",
+      error: "",
+    });
+  }
+
+  function closeCollectionDialog() {
+    setCollectionDialog(createCollectionDialogState());
+  }
+
+  async function submitCollection() {
+    if (!collectionDialog.payload) return;
+
+    setCollectionDialog((current) => ({ ...current, saving: true, error: "", message: "" }));
+    let notebookId = Number(collectionDialog.selectedNotebookId || 0);
+
+    try {
+      if (!notebookId) {
+        const createdNotebook = await createNotebookItem(collectionDialog.type, collectionDialog.newNotebookName || "", false);
+        if (!createdNotebook?.id) {
+          setCollectionDialog((current) => ({
+            ...current,
+            saving: false,
+            error: current.newNotebookName ? "创建收集册失败。" : "请选择一个收集册，或新建后再保存。",
+          }));
+          return;
+        }
+        notebookId = createdNotebook.id;
+      }
+
+      const endpoint =
+        collectionDialog.type === "word"
+          ? `/api/notebooks/${notebookId}/words`
+          : `/api/notebooks/${notebookId}/sentences`;
+
+      const response = await apiFetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(collectionDialog.payload),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `收藏失败：${response.status}`);
+
+      await refreshNotebooks(notebookId);
+      setNotebookState((current) => ({
+        ...current,
+        message: payload.entry?.duplicate ? "该条目已经在收集册里了，已更新最近使用时间。" : "已收藏到收集册。",
+        error: "",
+      }));
+      closeCollectionDialog();
+    } catch (error) {
+      setCollectionDialog((current) => ({
+        ...current,
+        saving: false,
+        error: error instanceof Error ? error.message : "收藏失败。",
+      }));
+    }
+  }
+
+  async function deleteNotebookEntry(entryId) {
+    if (!activeNotebook) return;
+    const endpoint =
+      activeNotebook.type === "word"
+        ? `/api/notebooks/${activeNotebook.id}/words/${entryId}`
+        : `/api/notebooks/${activeNotebook.id}/sentences/${entryId}`;
+
+    try {
+      setNotebookState((current) => ({ ...current, saving: true, error: "", message: "" }));
+      const response = await apiFetch(endpoint, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || `删除条目失败：${response.status}`);
+      await refreshNotebooks(activeNotebook.id);
+      setNotebookState((current) => ({ ...current, saving: false, message: "条目已删除。" }));
+    } catch (error) {
+      setNotebookState((current) => ({
+        ...current,
+        saving: false,
+        error: error instanceof Error ? error.message : "删除条目失败。",
+      }));
+    }
+  }
+
+  async function exportNotebook(format) {
+    if (!activeNotebook) return;
+    await downloadExport(`/api/notebooks/${activeNotebook.id}/export?format=${encodeURIComponent(format)}`, `${activeNotebook.name}.${format}`);
   }
 
   async function deleteVideoItem(video) {
@@ -593,7 +925,7 @@ function App() {
           setSession(null);
           setSelectedId(null);
           setActiveId(null);
-          setAnalysisStatus({ loading: false, message: "", streamText: "", error: "" });
+          setAnalysisStatus(EMPTY_ANALYSIS_STATUS);
         }
       }
     } catch (error) {
@@ -835,6 +1167,60 @@ function App() {
     ));
   }
 
+  function buildWordCollectionPayload(item) {
+    if (!selectedSegment || !item) return null;
+    return {
+      word: item.word,
+      meaning: item.meaning,
+      note: item.note,
+      source_sentence: selectedSegment.source_text || selectedSegment.en || "",
+      learning_sentence: selectedSegment.learning_text || selectedSegment.zh || "",
+      source_lang: sourceLanguageCode,
+      learning_lang: learningLanguageCode,
+      native_lang: nativeLanguageCode,
+      segment_id: selectedSegment.id,
+      video_id: currentVideo?.id ?? null,
+      video_stem: currentVideo?.stem ?? "",
+      video_title: currentVideo?.title ?? session?.title ?? "",
+      start_time: selectedSegment.start,
+      end_time: selectedSegment.end,
+      analysis_model: analysisModel,
+      analysis_payload: analysis,
+    };
+  }
+
+  function getAnalysisSnapshotForSegment(segmentId) {
+    if (!session?.video?.id || !segmentId) return null;
+    const cacheKey = `${session.video.id}:${segmentId}:${analysisModel}`;
+    if (analysisByKey[cacheKey]?.analysis) {
+      return analysisByKey[cacheKey].analysis;
+    }
+    if (selectedSegment?.id === segmentId && analysis) {
+      return analysis;
+    }
+    return null;
+  }
+
+  function buildSentenceCollectionPayload(segment, analysisSnapshot = null) {
+    if (!segment) return null;
+    const resolvedAnalysis = analysisSnapshot || getAnalysisSnapshotForSegment(segment.id);
+    return {
+      source_text: segment.source_text || segment.en || "",
+      learning_text: segment.learning_text || segment.zh || "",
+      source_lang: sourceLanguageCode,
+      learning_lang: learningLanguageCode,
+      native_lang: nativeLanguageCode,
+      segment_id: segment.id,
+      video_id: currentVideo?.id ?? null,
+      video_stem: currentVideo?.stem ?? "",
+      video_title: currentVideo?.title ?? session?.title ?? "",
+      start_time: segment.start,
+      end_time: segment.end,
+      analysis_model: resolvedAnalysis ? analysisModel : "",
+      analysis_payload: resolvedAnalysis,
+    };
+  }
+
   async function downloadExport(path, fallbackName) {
     try {
       setExportState("正在导出...");
@@ -907,7 +1293,10 @@ function App() {
       </article>
 
       <article className={`insight-card wide ${isStreaming ? "streaming-card" : ""}`}>
-        <h3>关键词</h3>
+        <div className="insight-card-header">
+          <h3>关键词</h3>
+          {!isStreaming && payload.keywords?.length ? <span className="panel-caption">可直接收藏到词语册</span> : null}
+        </div>
         {payload.keywords?.length ? (
           <div className="keyword-list">
             {payload.keywords.map((item) => (
@@ -915,6 +1304,15 @@ function App() {
                 <strong>{item.word}</strong>
                 <span>{item.meaning}</span>
                 <small>{item.note}</small>
+                {!isStreaming ? (
+                  <button
+                    type="button"
+                    className="ghost-button small collect-button"
+                    onClick={() => openCollectionDialog("word", buildWordCollectionPayload(item), wordNotebooks[0]?.id)}
+                  >
+                    收藏词语
+                  </button>
+                ) : null}
               </div>
             ))}
           </div>
@@ -955,6 +1353,7 @@ function App() {
         </div>
         <div className="topbar-actions">
           <button type="button" className="ghost-button" onClick={() => setShowLibrary((value) => !value)}>视频库</button>
+          <button type="button" className="ghost-button" onClick={() => (showNotebooks ? closeNotebooksPanel() : openNotebooksPanel())}>收集册</button>
           <button type="button" className="ghost-button" onClick={() => (showSettings ? closeSettingsPanel() : openSettingsPanel())}>设置</button>
           <span className="chip chip-soft">实时翻译: {activeTranslationLabel}</span>
           <span className="chip chip-soft">{sourceLanguageText} → {learningLanguageText}</span>
@@ -1100,7 +1499,16 @@ function App() {
                   <div className="selected-card">
                     <div className="selected-meta">
                       <span>{formatTime(selectedSegment.start)} - {formatTime(selectedSegment.end)}</span>
-                      <span>ID {selectedSegment.id}</span>
+                      <div className="selected-meta-actions">
+                        <span>ID {selectedSegment.id}</span>
+                        <button
+                          type="button"
+                          className="ghost-button small collect-button"
+                          onClick={() => openCollectionDialog("sentence", buildSentenceCollectionPayload(selectedSegment), sentenceNotebooks[0]?.id)}
+                        >
+                          收藏句子
+                        </button>
+                      </div>
                     </div>
                     {renderSegmentLines(selectedSegment, "source_learning", "selected")}
                   </div>
@@ -1145,21 +1553,40 @@ function App() {
                 const toneClass = isSelected ? "selected" : isActive ? "active" : activeId && segment.id < activeId ? "past" : "future";
 
                 return (
-                  <button
+                  <article
                     key={segment.id}
                     ref={(node) => {
                       if (node) subtitleRefs.current[segment.id] = node;
                     }}
-                    type="button"
                     className={`subtitle-card ${toneClass}`}
                     onClick={() => handleSubtitleClick(segment)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        handleSubtitleClick(segment);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
                   >
                     <div className="subtitle-card-top">
                       <div className="subtitle-timing">{formatTime(segment.start)}</div>
-                      <div className="subtitle-index">#{segment.id}</div>
+                      <div className="subtitle-card-actions">
+                        <div className="subtitle-index">#{segment.id}</div>
+                        <button
+                          type="button"
+                          className="ghost-button small collect-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openCollectionDialog("sentence", buildSentenceCollectionPayload(segment), sentenceNotebooks[0]?.id);
+                          }}
+                        >
+                          收藏
+                        </button>
+                      </div>
                     </div>
                     {renderSegmentLines(segment, displayMode, "subtitle")}
-                  </button>
+                  </article>
                 );
               })
             ) : (
@@ -1521,6 +1948,288 @@ function App() {
             </div>
           </div>
         </section>
+      ) : null}
+
+      {showNotebooks ? (
+        <section className="overlay-panel notebook-overlay">
+          <div className="overlay-header">
+            <div>
+              <p className="panel-label">Notebook</p>
+              <h2>词语 / 句子收集册</h2>
+              {notebookState.message ? <p className="overlay-header-note">{notebookState.message}</p> : null}
+              {notebookState.error ? <p className="overlay-header-note notebook-error">{notebookState.error}</p> : null}
+            </div>
+            <div className="overlay-header-actions">
+              <button type="button" className="ghost-button" onClick={() => openNotebookDialog("word")}>新建词语册</button>
+              <button type="button" className="ghost-button" onClick={() => openNotebookDialog("sentence")}>新建句子册</button>
+              <button type="button" className="ghost-button" onClick={closeNotebooksPanel}>关闭</button>
+            </div>
+          </div>
+
+          <div className="overlay-scroll-region">
+            <div className="notebook-layout">
+              <aside className="overlay-card notebook-sidebar">
+                <div className="notebook-group">
+                  <div className="notebook-group-header">
+                    <h3>词语册</h3>
+                    <span className="panel-caption">{wordNotebooks.length} 本</span>
+                  </div>
+                  {wordNotebooks.length ? (
+                    wordNotebooks.map((notebook) => (
+                      <button
+                        key={notebook.id}
+                        type="button"
+                        className={`notebook-nav-item ${activeNotebookId === notebook.id ? "active" : ""}`}
+                        onClick={() => setActiveNotebookId(notebook.id)}
+                      >
+                        <span className="notebook-nav-name">{notebook.name}</span>
+                        <span className="notebook-nav-count">{notebook.entry_count}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="empty-state compact notebook-empty">还没有词语册</div>
+                  )}
+                </div>
+
+                <div className="notebook-group">
+                  <div className="notebook-group-header">
+                    <h3>句子册</h3>
+                    <span className="panel-caption">{sentenceNotebooks.length} 本</span>
+                  </div>
+                  {sentenceNotebooks.length ? (
+                    sentenceNotebooks.map((notebook) => (
+                      <button
+                        key={notebook.id}
+                        type="button"
+                        className={`notebook-nav-item ${activeNotebookId === notebook.id ? "active" : ""}`}
+                        onClick={() => setActiveNotebookId(notebook.id)}
+                      >
+                        <span className="notebook-nav-name">{notebook.name}</span>
+                        <span className="notebook-nav-count">{notebook.entry_count}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="empty-state compact notebook-empty">还没有句子册</div>
+                  )}
+                </div>
+              </aside>
+
+              <section className="overlay-card notebook-content">
+                {activeNotebook ? (
+                  <>
+                    <div className="notebook-content-header">
+                      <div>
+                        <p className="panel-label">{notebookTypeLabel(activeNotebook.type)}</p>
+                        <h3>{activeNotebook.name}</h3>
+                        <p className="panel-caption">
+                          {languageLabel(activeNotebook.source_lang)} → {languageLabel(activeNotebook.learning_lang)} · {activeNotebook.entry_count} 条
+                        </p>
+                      </div>
+                      <div className="notebook-toolbar">
+                        {NOTEBOOK_EXPORT_OPTIONS.map((option) => (
+                          <button key={option.value} type="button" className="ghost-button small" onClick={() => exportNotebook(option.value)}>
+                            导出 {option.label}
+                          </button>
+                        ))}
+                        <button type="button" className="ghost-button small" onClick={() => renameNotebookItem(activeNotebook)}>重命名</button>
+                        <button type="button" className="ghost-button small danger-button" onClick={() => deleteNotebookItem(activeNotebook)}>删除</button>
+                      </div>
+                    </div>
+
+                    {activeNotebookLoading ? (
+                      <div className="banner loading">正在加载收集册内容...</div>
+                    ) : activeNotebookEntries.length ? (
+                      <div className="notebook-entry-list">
+                        {activeNotebook.type === "word"
+                          ? activeNotebookEntries.map((entry) => (
+                              <article className="notebook-entry-card" key={entry.id}>
+                                <div className="notebook-entry-top">
+                                  <div>
+                                    <strong>{entry.word}</strong>
+                                    <p className="notebook-entry-sub">{entry.meaning || "未填写释义"}</p>
+                                  </div>
+                                  <button type="button" className="ghost-button small danger-button" onClick={() => deleteNotebookEntry(entry.id)}>
+                                    删除
+                                  </button>
+                                </div>
+                                {entry.note ? <p className="notebook-entry-note">{entry.note}</p> : null}
+                                <div className="notebook-entry-lines">
+                                  {entry.source_sentence ? <p><span>原句</span>{entry.source_sentence}</p> : null}
+                                  {entry.learning_sentence ? <p><span>学习语言</span>{entry.learning_sentence}</p> : null}
+                                </div>
+                                <div className="notebook-entry-meta">
+                                  <span>{entry.video_title || "未记录视频"}</span>
+                                  <span>{formatTime(entry.start_time)} - {formatTime(entry.end_time)}</span>
+                                </div>
+                              </article>
+                            ))
+                          : activeNotebookEntries.map((entry) => (
+                              <article className="notebook-entry-card" key={entry.id}>
+                                <div className="notebook-entry-top">
+                                  <div>
+                                    <strong>{entry.source_text || "未填写原句"}</strong>
+                                    <p className="notebook-entry-sub">{entry.learning_text || "未填写学习语言句子"}</p>
+                                  </div>
+                                  <button type="button" className="ghost-button small danger-button" onClick={() => deleteNotebookEntry(entry.id)}>
+                                    删除
+                                  </button>
+                                </div>
+                                <div className="notebook-entry-meta">
+                                  <span>{entry.video_title || "未记录视频"}</span>
+                                  <span>{formatTime(entry.start_time)} - {formatTime(entry.end_time)}</span>
+                                </div>
+                                <details className="notebook-analysis-details">
+                                  <summary>{entry.analysis_payload ? "查看解析快照" : "查看解析快照（未保存）"}</summary>
+                                  <div className="notebook-analysis-grid">
+                                    {entry.analysis_payload ? (
+                                      <>
+                                        {entry.analysis_payload.improved_translation ? (
+                                          <p><span>优化译文</span>{entry.analysis_payload.improved_translation}</p>
+                                        ) : null}
+                                        {entry.analysis_payload.structure_explanation ? (
+                                          <p><span>句子结构</span>{entry.analysis_payload.structure_explanation}</p>
+                                        ) : null}
+                                        {entry.analysis_payload.learning_tip ? (
+                                          <p><span>学习提示</span>{entry.analysis_payload.learning_tip}</p>
+                                        ) : null}
+                                        {entry.analysis_payload.keywords?.length ? (
+                                          <div>
+                                            <span>关键词</span>
+                                            <div className="keyword-list notebook-keyword-list">
+                                              {entry.analysis_payload.keywords.map((item) => (
+                                                <div className="keyword-pill notebook-keyword-pill" key={`${entry.id}-${item.word}-${item.meaning}`}>
+                                                  <strong>{item.word}</strong>
+                                                  <span>{item.meaning}</span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        ) : null}
+                                      </>
+                                    ) : (
+                                      <p className="notebook-analysis-empty">
+                                        这条句子在收藏时没有附带解析快照。先点开该句查看解析后再收藏，后续保存进来的条目会更完整。
+                                      </p>
+                                    )}
+                                  </div>
+                                </details>
+                              </article>
+                            ))}
+                      </div>
+                    ) : (
+                      <div className="empty-state compact notebook-empty">这个收集册还没有内容，去字幕区或点句解析区收藏一些吧。</div>
+                    )}
+                  </>
+                ) : (
+                  <div className="empty-state">先新建一个词语册或句子册，再开始积累学习内容。</div>
+                )}
+              </section>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {notebookDialog.open ? (
+        <div className="dialog-backdrop" onClick={closeNotebookDialog}>
+          <section className="collection-dialog notebook-create-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="collection-dialog-header">
+              <div>
+                <p className="panel-label">Notebook</p>
+                <h3>新建{notebookTypeLabel(notebookDialog.type)}</h3>
+              </div>
+              <button type="button" className="ghost-button small" onClick={closeNotebookDialog}>关闭</button>
+            </div>
+
+            <div className="collection-dialog-body">
+              <label className="field">
+                <span>{notebookTypeLabel(notebookDialog.type)}名称</span>
+                <input
+                  value={notebookDialog.name}
+                  onChange={(event) => setNotebookDialog((current) => ({ ...current, name: event.target.value, error: "" }))}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      submitNotebookDialog();
+                    }
+                  }}
+                  placeholder={notebookDialog.type === "word" ? "比如：旅行词汇 / 面试高频词" : "比如：韩语例句 / 听力难句"}
+                  autoFocus
+                />
+              </label>
+
+              <div className="collection-preview">
+                <strong>保存后就可以在关键词卡片或字幕句子上直接收藏进去</strong>
+                <p>
+                  当前默认语言：{sourceLanguageText} → {learningLanguageText}，解析语言为 {nativeLanguageText}。
+                </p>
+              </div>
+
+              {notebookDialog.error ? <div className="banner error">{notebookDialog.error}</div> : null}
+            </div>
+
+            <div className="collection-dialog-footer">
+              <button type="button" className="ghost-button" onClick={closeNotebookDialog}>取消</button>
+              <button type="button" className="primary-button" onClick={submitNotebookDialog} disabled={notebookDialog.saving}>
+                {notebookDialog.saving ? "创建中..." : "创建收集册"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {collectionDialog.open ? (
+        <div className="dialog-backdrop" onClick={closeCollectionDialog}>
+          <section className="collection-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="collection-dialog-header">
+              <div>
+                <p className="panel-label">Collect</p>
+                <h3>收藏到{notebookTypeLabel(collectionDialog.type)}</h3>
+              </div>
+              <button type="button" className="ghost-button small" onClick={closeCollectionDialog}>关闭</button>
+            </div>
+
+            <div className="collection-dialog-body">
+              <label className="field">
+                <span>选择已有收集册</span>
+                <SelectMenu
+                  value={collectionDialog.selectedNotebookId}
+                  options={collectionCandidates.map((notebook) => ({ value: String(notebook.id), label: `${notebook.name} (${notebook.entry_count})` }))}
+                  onChange={(nextValue) => setCollectionDialog((current) => ({ ...current, selectedNotebookId: nextValue, newNotebookName: "", error: "" }))}
+                  placeholder={collectionCandidates.length ? "请选择收集册" : "还没有可用收集册"}
+                />
+              </label>
+
+              <label className="field">
+                <span>或者新建一个收集册</span>
+                <input
+                  value={collectionDialog.newNotebookName}
+                  onChange={(event) => setCollectionDialog((current) => ({ ...current, newNotebookName: event.target.value, selectedNotebookId: "", error: "" }))}
+                  placeholder={collectionDialog.type === "word" ? "比如：旅行口语词汇" : "比如：韩语高频例句"}
+                />
+              </label>
+
+              {collectionDialog.payload ? (
+                <div className="collection-preview">
+                  <strong>{collectionDialog.type === "word" ? collectionDialog.payload.word : collectionDialog.payload.source_text}</strong>
+                  <p>
+                    {collectionDialog.type === "word"
+                      ? collectionDialog.payload.meaning || collectionDialog.payload.source_sentence
+                      : collectionDialog.payload.learning_text || "将保存当前句子的学习语言版本"}
+                  </p>
+                </div>
+              ) : null}
+
+              {collectionDialog.error ? <div className="banner error">{collectionDialog.error}</div> : null}
+            </div>
+
+            <div className="collection-dialog-footer">
+              <button type="button" className="ghost-button" onClick={closeCollectionDialog}>取消</button>
+              <button type="button" className="primary-button" onClick={submitCollection} disabled={collectionDialog.saving}>
+                {collectionDialog.saving ? "保存中..." : "确认收藏"}
+              </button>
+            </div>
+          </section>
+        </div>
       ) : null}
     </div>
   );

@@ -1,17 +1,37 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import mimetypes
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 
 from backend.app.services.analysis import analyze_sentence, stream_sentence_analysis
-from backend.app.services.database import get_analysis_cache, init_db, upsert_analysis_cache
+from backend.app.services.database import (
+    add_sentence_entry,
+    add_word_entry,
+    create_notebook,
+    delete_notebook,
+    delete_sentence_entry,
+    delete_word_entry,
+    get_analysis_cache,
+    get_notebook,
+    get_notebook_export_payload,
+    init_db,
+    list_notebooks,
+    list_sentence_entries,
+    list_word_entries,
+    update_notebook,
+    upsert_analysis_cache,
+)
 from backend.app.services.exporting import ensure_subtitle_export, export_video_with_subtitles
 from backend.app.services.language_support import normalize_lang_code
 from backend.app.services.llm_common import OpenAICompatibleConfig, post_chat_json, resolve_endpoint
@@ -284,6 +304,163 @@ def _analysis_context(
     return previous_text, next_text
 
 
+def _seconds_label(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        total = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    minutes = int(total // 60)
+    seconds = total - minutes * 60
+    return f"{minutes:02d}:{seconds:06.3f}"
+
+
+def _safe_export_name(value: str) -> str:
+    compact = re.sub(r"\s+", "-", str(value or "").strip())
+    cleaned = re.sub(r'[<>:"/\\\\|?*]+', "-", compact)
+    cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-")
+    return cleaned or "notebook"
+
+
+def _download_headers(filename: str) -> dict[str, str]:
+    return {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+    }
+
+
+def _http_error_from_value_error(exc: ValueError) -> HTTPException:
+    detail = str(exc)
+    status = 404 if "not found" in detail.lower() else 400
+    return HTTPException(status_code=status, detail=detail)
+
+
+def _notebook_export_response(notebook_id: int, export_format: str) -> Response:
+    payload = get_notebook_export_payload(notebook_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail=f"Notebook id {notebook_id} not found.")
+
+    notebook = payload["notebook"]
+    entries = payload["entries"]
+    extension = export_format.lower()
+    base_name = f"{_safe_export_name(notebook['name'])}.{extension}"
+
+    if extension == "json":
+        return Response(
+            content=json.dumps(payload, ensure_ascii=False, indent=2),
+            media_type="application/json",
+            headers=_download_headers(base_name),
+        )
+
+    if extension == "csv":
+        buffer = io.StringIO()
+        if notebook["type"] == "word":
+            fieldnames = [
+                "word",
+                "meaning",
+                "note",
+                "source_sentence",
+                "learning_sentence",
+                "video_title",
+                "start_time",
+                "end_time",
+                "created_at",
+            ]
+            rows = [
+                {
+                    "word": entry["word"],
+                    "meaning": entry["meaning"],
+                    "note": entry["note"],
+                    "source_sentence": entry["source_sentence"],
+                    "learning_sentence": entry["learning_sentence"],
+                    "video_title": entry["video_title"],
+                    "start_time": _seconds_label(entry["start_time"]),
+                    "end_time": _seconds_label(entry["end_time"]),
+                    "created_at": entry["created_at"],
+                }
+                for entry in entries
+            ]
+        else:
+            fieldnames = [
+                "source_text",
+                "learning_text",
+                "video_title",
+                "start_time",
+                "end_time",
+                "created_at",
+            ]
+            rows = [
+                {
+                    "source_text": entry["source_text"],
+                    "learning_text": entry["learning_text"],
+                    "video_title": entry["video_title"],
+                    "start_time": _seconds_label(entry["start_time"]),
+                    "end_time": _seconds_label(entry["end_time"]),
+                    "created_at": entry["created_at"],
+                }
+                for entry in entries
+            ]
+
+        writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+        return Response(content=buffer.getvalue(), media_type="text/csv", headers=_download_headers(base_name))
+
+    if extension == "md":
+        lines = [
+            f"# {notebook['name']}",
+            "",
+            f"- 类型: {'词语收集册' if notebook['type'] == 'word' else '句子收集册'}",
+            f"- 条目数: {notebook['entry_count']}",
+            f"- 源语言: {notebook.get('source_lang') or '未设置'}",
+            f"- 学习语言: {notebook.get('learning_lang') or '未设置'}",
+            f"- 母语: {notebook.get('native_lang') or '未设置'}",
+            "",
+        ]
+        if notebook.get("description"):
+            lines.extend([notebook["description"], ""])
+
+        for index, entry in enumerate(entries, start=1):
+            if notebook["type"] == "word":
+                lines.extend(
+                    [
+                        f"## {index}. {entry['word']}",
+                        "",
+                        f"- 释义: {entry['meaning'] or '未填写'}",
+                        f"- 备注: {entry['note'] or '未填写'}",
+                        f"- 原句: {entry['source_sentence'] or '未填写'}",
+                        f"- 学习语言句子: {entry['learning_sentence'] or '未填写'}",
+                        f"- 视频: {entry['video_title'] or '未记录'}",
+                        f"- 时间: {_seconds_label(entry['start_time'])} ~ {_seconds_label(entry['end_time'])}",
+                        "",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        f"## {index}. 句子",
+                        "",
+                        f"- 原句: {entry['source_text'] or '未填写'}",
+                        f"- 学习语言句子: {entry['learning_text'] or '未填写'}",
+                        f"- 视频: {entry['video_title'] or '未记录'}",
+                        f"- 时间: {_seconds_label(entry['start_time'])} ~ {_seconds_label(entry['end_time'])}",
+                        "",
+                    ]
+                )
+                analysis_payload = entry.get("analysis_payload") or {}
+                if analysis_payload:
+                    lines.extend(
+                        [
+                            f"  - 优化译文: {analysis_payload.get('improved_translation') or '未生成'}",
+                            f"  - 句子结构: {analysis_payload.get('structure_explanation') or '未生成'}",
+                            "",
+                        ]
+                    )
+        return Response(content="\n".join(lines), media_type="text/markdown", headers=_download_headers(base_name))
+
+    raise HTTPException(status_code=400, detail="Unsupported export format.")
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -343,6 +520,106 @@ def test_llm_connection(payload: dict[str, Any]) -> dict[str, Any]:
 def list_videos() -> dict[str, Any]:
     sync_video_library()
     return {"videos": list_library_items()}
+
+
+@app.get("/api/notebooks")
+def read_notebooks() -> dict[str, Any]:
+    return {"notebooks": list_notebooks()}
+
+
+@app.post("/api/notebooks")
+def create_notebook_route(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        notebook = create_notebook(payload)
+    except ValueError as exc:
+        raise _http_error_from_value_error(exc) from exc
+    return {"notebook": notebook}
+
+
+@app.patch("/api/notebooks/{notebook_id}")
+def update_notebook_route(notebook_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        notebook = update_notebook(notebook_id, payload)
+    except ValueError as exc:
+        raise _http_error_from_value_error(exc) from exc
+    return {"notebook": notebook}
+
+
+@app.delete("/api/notebooks/{notebook_id}")
+def delete_notebook_route(notebook_id: int) -> dict[str, Any]:
+    notebook = delete_notebook(notebook_id)
+    if not notebook:
+        raise HTTPException(status_code=404, detail=f"Notebook id {notebook_id} not found.")
+    return {"deleted": notebook}
+
+
+@app.get("/api/notebooks/{notebook_id}/words")
+def read_word_entries(notebook_id: int) -> dict[str, Any]:
+    notebook = get_notebook(notebook_id)
+    if not notebook:
+        raise HTTPException(status_code=404, detail=f"Notebook id {notebook_id} not found.")
+    try:
+        entries = list_word_entries(notebook_id)
+    except ValueError as exc:
+        raise _http_error_from_value_error(exc) from exc
+    return {"notebook": notebook, "entries": entries}
+
+
+@app.post("/api/notebooks/{notebook_id}/words")
+def create_word_entry_route(notebook_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        entry = add_word_entry(notebook_id, payload)
+    except ValueError as exc:
+        raise _http_error_from_value_error(exc) from exc
+    return {"entry": entry}
+
+
+@app.delete("/api/notebooks/{notebook_id}/words/{entry_id}")
+def delete_word_entry_route(notebook_id: int, entry_id: int) -> dict[str, Any]:
+    try:
+        deleted = delete_word_entry(notebook_id, entry_id)
+    except ValueError as exc:
+        raise _http_error_from_value_error(exc) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Word entry id {entry_id} not found.")
+    return {"deleted": deleted}
+
+
+@app.get("/api/notebooks/{notebook_id}/sentences")
+def read_sentence_entries(notebook_id: int) -> dict[str, Any]:
+    notebook = get_notebook(notebook_id)
+    if not notebook:
+        raise HTTPException(status_code=404, detail=f"Notebook id {notebook_id} not found.")
+    try:
+        entries = list_sentence_entries(notebook_id)
+    except ValueError as exc:
+        raise _http_error_from_value_error(exc) from exc
+    return {"notebook": notebook, "entries": entries}
+
+
+@app.post("/api/notebooks/{notebook_id}/sentences")
+def create_sentence_entry_route(notebook_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        entry = add_sentence_entry(notebook_id, payload)
+    except ValueError as exc:
+        raise _http_error_from_value_error(exc) from exc
+    return {"entry": entry}
+
+
+@app.delete("/api/notebooks/{notebook_id}/sentences/{entry_id}")
+def delete_sentence_entry_route(notebook_id: int, entry_id: int) -> dict[str, Any]:
+    try:
+        deleted = delete_sentence_entry(notebook_id, entry_id)
+    except ValueError as exc:
+        raise _http_error_from_value_error(exc) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Sentence entry id {entry_id} not found.")
+    return {"deleted": deleted}
+
+
+@app.get("/api/notebooks/{notebook_id}/export")
+def export_notebook(notebook_id: int, format: str = Query(default="json")) -> Response:
+    return _notebook_export_response(notebook_id, str(format or "json").strip().lower())
 
 
 @app.post("/api/videos/upload")
