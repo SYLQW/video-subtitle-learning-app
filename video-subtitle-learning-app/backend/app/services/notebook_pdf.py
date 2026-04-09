@@ -27,7 +27,9 @@ PDF_MARGIN_BOTTOM = 14 * mm
 PDF_CONTENT_WIDTH = PDF_PAGE_SIZE[0] - PDF_MARGIN_X * 2
 
 PRIMARY_FONT_NAME = "NotebookPdfPrimaryFont"
+PRIMARY_BOLD_FONT_NAME = "NotebookPdfPrimaryBoldFont"
 KOREAN_FONT_NAME = "NotebookPdfKoreanFont"
+KOREAN_BOLD_FONT_NAME = "NotebookPdfKoreanBoldFont"
 FALLBACK_FONT_NAME = "STSong-Light"
 HANGUL_RE = re.compile(r"[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF]+")
 
@@ -43,12 +45,23 @@ def _font_candidates() -> dict[str, list[Path]]:
             Path(r"C:\Windows\Fonts\simhei.ttf"),
             Path(r"C:\Windows\Fonts\simsun.ttc"),
         ],
+        "primary_bold": [
+            app_root / "assets" / "fonts" / "NotoSansSC-Bold.otf",
+            app_root / "assets" / "fonts" / "SourceHanSansSC-Bold.otf",
+            Path(r"C:\Windows\Fonts\msyhbd.ttc"),
+            Path(r"C:\Windows\Fonts\simhei.ttf"),
+        ],
         "korean": [
             app_root / "assets" / "fonts" / "NotoSansKR-Regular.otf",
             app_root / "assets" / "fonts" / "SourceHanSansK-Regular.otf",
             Path(r"C:\Windows\Fonts\malgun.ttf"),
             Path(r"C:\Windows\Fonts\malgunsl.ttf"),
             Path(r"C:\Windows\Fonts\batang.ttc"),
+        ],
+        "korean_bold": [
+            app_root / "assets" / "fonts" / "NotoSansKR-Bold.otf",
+            app_root / "assets" / "fonts" / "SourceHanSansK-Bold.otf",
+            Path(r"C:\Windows\Fonts\malgunbd.ttf"),
         ],
     }
 
@@ -73,6 +86,17 @@ def ensure_pdf_fonts() -> dict[str, str]:
     else:
         primary_font = PRIMARY_FONT_NAME
 
+    if PRIMARY_BOLD_FONT_NAME not in set(pdfmetrics.getRegisteredFontNames()):
+        for candidate in _font_candidates()["primary_bold"]:
+            if not candidate.exists():
+                continue
+            try:
+                pdfmetrics.registerFont(TTFont(PRIMARY_BOLD_FONT_NAME, str(candidate)))
+                break
+            except Exception:
+                continue
+    primary_bold_font = PRIMARY_BOLD_FONT_NAME if PRIMARY_BOLD_FONT_NAME in set(pdfmetrics.getRegisteredFontNames()) else primary_font
+
     if KOREAN_FONT_NAME not in set(pdfmetrics.getRegisteredFontNames()):
         for candidate in _font_candidates()["korean"]:
             if not candidate.exists():
@@ -84,17 +108,35 @@ def ensure_pdf_fonts() -> dict[str, str]:
                 continue
 
     korean_font = KOREAN_FONT_NAME if KOREAN_FONT_NAME in set(pdfmetrics.getRegisteredFontNames()) else primary_font
-    return {"primary": primary_font, "korean": korean_font}
+
+    if KOREAN_BOLD_FONT_NAME not in set(pdfmetrics.getRegisteredFontNames()):
+        for candidate in _font_candidates()["korean_bold"]:
+            if not candidate.exists():
+                continue
+            try:
+                pdfmetrics.registerFont(TTFont(KOREAN_BOLD_FONT_NAME, str(candidate)))
+                break
+            except Exception:
+                continue
+    korean_bold_font = KOREAN_BOLD_FONT_NAME if KOREAN_BOLD_FONT_NAME in set(pdfmetrics.getRegisteredFontNames()) else korean_font
+
+    return {
+        "primary": primary_font,
+        "primary_bold": primary_bold_font,
+        "korean": korean_font,
+        "korean_bold": korean_bold_font,
+    }
 
 
 def _styles(fonts: dict[str, str]) -> dict[str, ParagraphStyle]:
     sample = getSampleStyleSheet()
     primary_font = fonts["primary"]
+    primary_bold_font = fonts["primary_bold"]
     return {
         "title": ParagraphStyle(
             "NotebookPdfTitle",
             parent=sample["Heading1"],
-            fontName=primary_font,
+            fontName=primary_bold_font,
             fontSize=18,
             leading=24,
             textColor=colors.HexColor("#111827"),
@@ -113,7 +155,7 @@ def _styles(fonts: dict[str, str]) -> dict[str, ParagraphStyle]:
         "entry_title": ParagraphStyle(
             "NotebookPdfEntryTitle",
             parent=sample["Heading2"],
-            fontName=primary_font,
+            fontName=primary_bold_font,
             fontSize=13,
             leading=18,
             textColor=colors.HexColor("#111827"),
@@ -126,6 +168,15 @@ def _styles(fonts: dict[str, str]) -> dict[str, ParagraphStyle]:
             fontSize=10.2,
             leading=15,
             textColor=colors.HexColor("#1f2937"),
+            spaceAfter=5,
+        ),
+        "label": ParagraphStyle(
+            "NotebookPdfLabel",
+            parent=sample["BodyText"],
+            fontName=primary_bold_font,
+            fontSize=10.4,
+            leading=15,
+            textColor=colors.HexColor("#111827"),
             spaceAfter=5,
         ),
         "meta": ParagraphStyle(
@@ -159,11 +210,15 @@ def _has_hangul(text: str) -> bool:
 
 
 def _rich_text(text: Any, fonts: dict[str, str]) -> str:
+    return _rich_text_with_fonts(text, fonts["primary"], fonts["korean"])
+
+
+def _rich_text_with_fonts(text: Any, primary_font: str, korean_font: str) -> str:
     raw = str(text or "")
     if not raw:
         return ""
 
-    if fonts["primary"] == fonts["korean"] or not _has_hangul(raw):
+    if primary_font == korean_font or not _has_hangul(raw):
         return escape(raw).replace("\n", "<br/>")
 
     parts: list[str] = []
@@ -172,7 +227,7 @@ def _rich_text(text: Any, fonts: dict[str, str]) -> str:
         if match.start() > cursor:
             parts.append(escape(raw[cursor : match.start()]))
         hangul = escape(match.group(0))
-        parts.append(f'<font name="{fonts["korean"]}">{hangul}</font>')
+        parts.append(f'<font name="{korean_font}">{hangul}</font>')
         cursor = match.end()
     if cursor < len(raw):
         parts.append(escape(raw[cursor:]))
@@ -188,7 +243,9 @@ def _markup_para(markup: str, style: ParagraphStyle) -> Paragraph:
 
 
 def _label_value(label: str, value: Any, style: ParagraphStyle, fonts: dict[str, str], *, empty: str = "未填写") -> Paragraph:
-    return Paragraph(f"<b>{escape(label)}</b> {_rich_text(_safe(value, empty), fonts)}", style)
+    label_markup = _rich_text_with_fonts(label, fonts["primary_bold"], fonts["korean_bold"])
+    value_markup = _rich_text_with_fonts(_safe(value, empty), fonts["primary"], fonts["korean"])
+    return Paragraph(f'<font name="{fonts["primary_bold"]}">{label_markup}</font> <font name="{fonts["primary"]}">{value_markup}</font>', style)
 
 
 def _time_range_label(entry: dict[str, Any]) -> str:
@@ -271,7 +328,7 @@ def _word_entry_card(index: int, entry: dict[str, Any], styles: dict[str, Paragr
         _label_value("备注", entry.get("note"), styles["body"], fonts, empty="无"),
         Spacer(1, 2),
         _label_value("原句", entry.get("source_sentence"), styles["body"], fonts),
-        _label_value("学习语言句子", entry.get("learning_sentence"), styles["body"], fonts),
+        _label_value("翻译", entry.get("learning_sentence"), styles["body"], fonts),
     ]
     return _entry_card(content)
 
@@ -304,9 +361,8 @@ def _sentence_entry_card(
     grammar_points = analysis_payload.get("grammar_points") or []
 
     content = [
-        _para(f"{index}. 句子", styles["entry_title"], fonts),
-        _label_value("原句", entry.get("source_text"), styles["body"], fonts),
-        _label_value("学习语言句子", entry.get("learning_text"), styles["body"], fonts),
+        _label_value(f"{index}. 原句", entry.get("source_text"), styles["body"], fonts),
+        _label_value("翻译", entry.get("learning_text"), styles["body"], fonts),
     ]
 
     if options["include_improved_translation"] and analysis_payload.get("improved_translation"):
