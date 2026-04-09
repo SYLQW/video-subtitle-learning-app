@@ -202,18 +202,43 @@ def upsert_setting_json(key: str, payload: dict[str, Any]) -> None:
 def upsert_video(path: str, title: str, source: str = "library") -> int:
     stem = Path(path).stem
     with get_connection() as connection:
-        connection.execute(
+        row = connection.execute(
             """
-            INSERT INTO videos (stem, title, path, source, updated_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(path) DO UPDATE SET
-                title = excluded.title,
-                source = excluded.source,
-                updated_at = CURRENT_TIMESTAMP
+            SELECT id, stem, path, source
+            FROM videos
+            WHERE path = ? OR stem = ?
+            ORDER BY CASE WHEN path = ? THEN 0 ELSE 1 END
+            LIMIT 1
             """,
-            (stem, title, path, source),
-        )
-        row = connection.execute("SELECT id FROM videos WHERE path = ?", (path,)).fetchone()
+            (path, stem, path),
+        ).fetchone()
+
+        if row:
+            connection.execute(
+                """
+                UPDATE videos
+                SET
+                    stem = ?,
+                    title = ?,
+                    path = ?,
+                    source = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (stem, title, path, source, row["id"]),
+            )
+            video_id = int(row["id"])
+        else:
+            cursor = connection.execute(
+                """
+                INSERT INTO videos (stem, title, path, source, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (stem, title, path, source),
+            )
+            video_id = int(cursor.lastrowid)
+
+        row = connection.execute("SELECT id FROM videos WHERE id = ?", (video_id,)).fetchone()
     return int(row["id"])
 
 

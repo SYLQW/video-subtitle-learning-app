@@ -239,7 +239,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-portable.ps1 -CleanOutp
 - 走 `tauri build --no-bundle`
 - 复制桌面 exe
 - 复制后端代码
-- 复制 `.venv`
+- 复制嵌入式 Python 运行时到 `runtime/python`
 - 复制 `models`
 - 复制 `ffmpeg`
 - 重置运行数据目录，生成干净发布包

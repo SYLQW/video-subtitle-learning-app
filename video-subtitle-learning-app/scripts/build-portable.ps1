@@ -92,6 +92,60 @@ function Resolve-ProjectPath {
     return [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot $RelativePath))
 }
 
+function Get-VenvBasePythonHome {
+    param([string]$VenvDir)
+
+    $cfgPath = Join-Path $VenvDir "pyvenv.cfg"
+    if (-not (Test-Path $cfgPath)) {
+        return $null
+    }
+
+    $homeLine = Get-Content $cfgPath | Where-Object { $_ -match '^\s*home\s*=' } | Select-Object -First 1
+    if (-not $homeLine) {
+        return $null
+    }
+
+    $homeValue = ($homeLine -split '=', 2)[1].Trim()
+    if ([string]::IsNullOrWhiteSpace($homeValue)) {
+        return $null
+    }
+
+    if (Test-Path $homeValue) {
+        return [System.IO.Path]::GetFullPath($homeValue)
+    }
+
+    return $null
+}
+
+function Copy-PortablePythonRuntime {
+    param(
+        [string]$VenvDir,
+        [string]$Destination
+    )
+
+    if (-not (Test-Path $VenvDir)) {
+        return $false
+    }
+
+    $baseHome = Get-VenvBasePythonHome -VenvDir $VenvDir
+    if (-not $baseHome) {
+        return $false
+    }
+
+    Write-Step "Copying embedded Python base runtime"
+    [void](Copy-Tree -Source $baseHome -Destination $Destination)
+
+    $venvSitePackages = Join-Path $VenvDir "Lib\site-packages"
+    $runtimeSitePackages = Join-Path $Destination "Lib\site-packages"
+    if (Test-Path $venvSitePackages) {
+        Write-Step "Copying Python dependencies into embedded runtime"
+        New-Item -ItemType Directory -Force -Path $runtimeSitePackages | Out-Null
+        [void](Copy-Tree -Source $venvSitePackages -Destination $runtimeSitePackages)
+    }
+
+    return $true
+}
+
 function Reset-Directory {
     param([string]$Path)
 
@@ -145,6 +199,7 @@ $frontendDir = Resolve-ProjectPath $projectRoot "frontend"
 $srcTauriDir = Resolve-ProjectPath $projectRoot "src-tauri"
 $backendDir = Resolve-ProjectPath $projectRoot "backend"
 $venvDir = Resolve-ProjectPath $projectRoot ".venv"
+$runtimePythonDir = Resolve-ProjectPath $projectRoot "runtime\python"
 $modelsDir = Resolve-ProjectPath $projectRoot "models"
 $readmePath = Resolve-ProjectPath $projectRoot "README.md"
 $desktopDocPath = Resolve-ProjectPath $projectRoot "docs\desktop-packaging-and-deployment.md"
@@ -202,9 +257,19 @@ if ($webview2Loader) {
 Write-Step "Copying backend"
 [void](Copy-Tree -Source $backendDir -Destination (Join-Path $packageRoot "backend") -ExcludeDirectories @("__pycache__", ".pytest_cache", ".mypy_cache") -ExcludeFiles @("*.pyc", "*.pyo"))
 
-if (-not $SkipVenvCopy -and (Test-Path $venvDir)) {
-    Write-Step "Copying Python runtime (.venv)"
-    [void](Copy-Tree -Source $venvDir -Destination (Join-Path $packageRoot ".venv"))
+if (-not $SkipVenvCopy) {
+    $embeddedPythonDestination = Join-Path $packageRoot "runtime\python"
+    $embeddedCopied = Copy-PortablePythonRuntime -VenvDir $venvDir -Destination $embeddedPythonDestination
+    if (-not $embeddedCopied -and (Test-Path $runtimePythonDir)) {
+        Write-Step "Copying existing runtime/python"
+        [void](Copy-Tree -Source $runtimePythonDir -Destination $embeddedPythonDestination)
+        $embeddedCopied = $true
+    }
+
+    if (-not $embeddedCopied -and (Test-Path $venvDir)) {
+        Write-Step "Embedded runtime unavailable, falling back to copying .venv"
+        [void](Copy-Tree -Source $venvDir -Destination (Join-Path $packageRoot ".venv"))
+    }
 }
 
 if (-not $SkipModelCopy -and (Test-Path $modelsDir)) {
@@ -247,7 +312,8 @@ $directories = @(
     "outputs\transcripts",
     "outputs\translations",
     "temp",
-    "runtime"
+    "runtime",
+    "runtime\python"
 )
 
 foreach ($relativeDir in $directories) {
@@ -276,7 +342,7 @@ This build is prepared for same-directory portable deployment.
 Expected layout:
 - $PackageName.exe
 - backend\
-- .venv\
+- runtime\python\
 - ffmpeg\
 - models\
 - data\
@@ -288,7 +354,7 @@ Notes:
 - If ffmpeg.exe and ffprobe.exe are present in .\ffmpeg\, the backend will use them first.
 - If local Whisper models are present in .\models\, the backend will load them from there first.
 - Runtime status inside Settings can verify FFmpeg, model availability, GPU, CUDA and cuDNN.
-- If .venv was not copied, provide a compatible Python runtime and set VIDEO_SUBTITLE_PYTHON, or place Python under .\.venv\ or .\runtime\python\.
+- The portable build prefers an embedded Python runtime under .\runtime\python\ and falls back to .\.venv\ only if needed.
 "@
 Set-Content -LiteralPath (Join-Path $packageRoot "PORTABLE-NOTES.txt") -Value $portableReadme -Encoding UTF8
 

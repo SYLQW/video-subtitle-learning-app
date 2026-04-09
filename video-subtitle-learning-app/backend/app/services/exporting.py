@@ -28,6 +28,12 @@ def _escape_subtitles_filter_path(path: Path) -> str:
     return escaped
 
 
+def _subtitle_language_tag(subtitle_mode: str) -> str:
+    if subtitle_mode == "bilingual":
+        return "mul"
+    return "und"
+
+
 def export_video_with_subtitles(
     *,
     source_video_path: str | Path,
@@ -62,6 +68,10 @@ def export_video_with_subtitles(
             "mov_text",
             "-metadata:s:s:0",
             f"title={subtitle_mode}",
+            "-metadata:s:s:0",
+            f"language={_subtitle_language_tag(subtitle_mode)}",
+            "-disposition:s:0",
+            "default",
             str(output_path),
         ]
     elif video_mode == "burned":

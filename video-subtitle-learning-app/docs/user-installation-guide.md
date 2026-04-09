@@ -17,7 +17,7 @@
 
 - `VideoSubtitleLearning.exe`
 - `backend/`
-- `.venv/`
+- `runtime/python/`
 - `models/`
 - `ffmpeg/`
 
@@ -71,7 +71,7 @@
 
 - 程序主文件
 - 后端代码
-- Python 运行环境 `.venv`
+- Python 运行环境 `runtime/python`
 - 本地 Whisper 模型目录
 - FFmpeg
 
@@ -92,7 +92,8 @@ VideoSubtitleLearning/
   VideoSubtitleLearning.exe
   WebView2Loader.dll
   backend/
-  .venv/
+  runtime/
+    python/
   models/
     faster-whisper-base/
       config.json

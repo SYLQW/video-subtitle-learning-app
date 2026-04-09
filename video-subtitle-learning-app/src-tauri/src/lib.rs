@@ -1,4 +1,5 @@
 use std::{
+    fs::{self, OpenOptions},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -64,10 +65,10 @@ fn resolve_app_root() -> PathBuf {
 
 fn python_candidates(app_root: &Path) -> Vec<PathBuf> {
     let mut candidates = vec![
-        app_root.join(".venv").join("Scripts").join("python.exe"),
-        app_root.join(".venv").join("bin").join("python"),
         app_root.join("runtime").join("python").join("python.exe"),
         app_root.join("runtime").join("python").join("bin").join("python"),
+        app_root.join(".venv").join("Scripts").join("python.exe"),
+        app_root.join(".venv").join("bin").join("python"),
         app_root.join("python").join("python.exe"),
     ];
 
@@ -90,6 +91,17 @@ fn resolve_python_executable(app_root: &Path) -> Result<PathBuf, String> {
         })
 }
 
+fn prepare_log_file(app_root: &Path, file_name: &str) -> Option<std::fs::File> {
+    let logs_dir = app_root.join("data").join("logs");
+    fs::create_dir_all(&logs_dir).ok()?;
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(logs_dir.join(file_name))
+        .ok()
+}
+
 fn spawn_backend(app_root: &Path) -> Result<Child, String> {
     let python = resolve_python_executable(app_root)?;
     let mut command = Command::new(python);
@@ -109,7 +121,15 @@ fn spawn_backend(app_root: &Path) -> Result<Child, String> {
     if cfg!(debug_assertions) {
         command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     } else {
-        command.stdout(Stdio::null()).stderr(Stdio::null());
+        if let Some(stdout_log) = prepare_log_file(app_root, "backend-sidecar.log") {
+            if let Ok(stderr_log) = stdout_log.try_clone() {
+                command.stdout(Stdio::from(stdout_log)).stderr(Stdio::from(stderr_log));
+            } else {
+                command.stdout(Stdio::from(stdout_log)).stderr(Stdio::null());
+            }
+        } else {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
     }

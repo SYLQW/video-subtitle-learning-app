@@ -325,6 +325,26 @@ function notebookTypeLabel(type) {
   return NOTEBOOK_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? type;
 }
 
+function subtitleTrackLang(code, fallback = "und") {
+  const normalized = String(code ?? "").trim().toUpperCase();
+  if (!normalized || normalized === "AUTO") return fallback;
+
+  const mapping = {
+    EN: "en",
+    ZH: "zh",
+    JA: "ja",
+    KO: "ko",
+    FR: "fr",
+    DE: "de",
+    ES: "es",
+    RU: "ru",
+    IT: "it",
+    PT: "pt",
+  };
+
+  return mapping[normalized] ?? normalized.toLowerCase();
+}
+
 function getSegmentTexts(segment) {
   const sourceText = segment?.source_text || segment?.en || "";
   const learningText = segment?.learning_text || segment?.zh || "";
@@ -408,6 +428,9 @@ function App() {
   const [showVideoTools, setShowVideoTools] = useState(false);
 
   const videoRef = useRef(null);
+  const sourceTrackRef = useRef(null);
+  const learningTrackRef = useRef(null);
+  const bilingualTrackRef = useRef(null);
   const leftColumnRef = useRef(null);
   const subtitleRefs = useRef({});
   const reviewTimeoutRef = useRef(null);
@@ -441,6 +464,9 @@ function App() {
   const sourceLanguageText = languageLabel(sourceLanguageCode);
   const learningLanguageText = languageLabel(learningLanguageCode);
   const nativeLanguageText = languageLabel(nativeLanguageCode);
+  const sourceTrackLang = subtitleTrackLang(sourceLanguageCode, "und");
+  const learningTrackLang = subtitleTrackLang(learningLanguageCode, "zh");
+  const bilingualTrackLang = "mul";
   const analysisCacheKey = session && selectedId ? `${session.video.id}:${selectedId}:${analysisModel}` : "";
   const analysisPayload = analysisCacheKey ? analysisByKey[analysisCacheKey] : null;
   const analysis = analysisPayload?.analysis ?? null;
@@ -644,16 +670,35 @@ function App() {
     if (!video) return;
 
     const syncTracks = () => {
-      const tracks = Array.from(video.textTracks ?? []);
-      for (const track of tracks) {
-        track.mode = track.language === playerSubtitleMode ? "showing" : "disabled";
+      const trackByMode = {
+        source: sourceTrackRef.current?.track ?? null,
+        learning: learningTrackRef.current?.track ?? null,
+        bilingual: bilingualTrackRef.current?.track ?? null,
+      };
+
+      Object.values(trackByMode).forEach((track) => {
+        if (track) {
+          track.mode = "disabled";
+        }
+      });
+
+      if (playerSubtitleMode === "off") return;
+      const selectedTrack = trackByMode[playerSubtitleMode] ?? null;
+      if (selectedTrack) {
+        selectedTrack.mode = "showing";
       }
     };
 
     syncTracks();
     video.addEventListener("loadedmetadata", syncTracks);
-    return () => video.removeEventListener("loadedmetadata", syncTracks);
-  }, [playerSubtitleMode, session]);
+    video.addEventListener("loadeddata", syncTracks);
+    const syncTimer = window.setTimeout(syncTracks, 120);
+    return () => {
+      window.clearTimeout(syncTimer);
+      video.removeEventListener("loadedmetadata", syncTracks);
+      video.removeEventListener("loadeddata", syncTracks);
+    };
+  }, [playerSubtitleMode, session, sourceLanguageText, learningLanguageText]);
 
   useEffect(() => {
     if (!activeNotebookId) return undefined;
@@ -1616,31 +1661,42 @@ function App() {
 
             <div className="video-stage">
               {session ? (
-                <video ref={videoRef} className="video-player" src={apiUrl(session.video_url)} controls onTimeUpdate={handleTimeUpdate}>
+                <video
+                  key={`${session.video.id}-${session.has_transcript}-${session.has_translation}`}
+                  ref={videoRef}
+                  className="video-player"
+                  src={apiUrl(session.video_url)}
+                  controls
+                  crossOrigin="anonymous"
+                  onTimeUpdate={handleTimeUpdate}
+                >
                   {session.has_transcript ? (
                     <track
                       key={`${session.video.id}-source`}
+                      ref={sourceTrackRef}
                       kind="subtitles"
                       label={`${sourceLanguageText} 字幕`}
-                      srcLang="source"
+                      srcLang={sourceTrackLang}
                       src={apiUrl(`/api/videos/${session.video.id}/tracks/source.vtt`)}
                     />
                   ) : null}
                   {session.has_translation ? (
                     <track
                       key={`${session.video.id}-learning`}
+                      ref={learningTrackRef}
                       kind="subtitles"
                       label={`${learningLanguageText} 字幕`}
-                      srcLang="learning"
+                      srcLang={learningTrackLang}
                       src={apiUrl(`/api/videos/${session.video.id}/tracks/learning.vtt`)}
                     />
                   ) : null}
                   {session.has_translation ? (
                     <track
                       key={`${session.video.id}-bilingual`}
+                      ref={bilingualTrackRef}
                       kind="subtitles"
                       label="双语字幕"
-                      srcLang="bilingual"
+                      srcLang={bilingualTrackLang}
                       src={apiUrl(`/api/videos/${session.video.id}/tracks/bilingual.vtt`)}
                     />
                   ) : null}

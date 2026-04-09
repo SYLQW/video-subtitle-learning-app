@@ -31,7 +31,8 @@ dist-portable/
   VideoSubtitleLearning/
     VideoSubtitleLearning.exe
     backend/
-    .venv/
+    runtime/
+      python/
     ffmpeg/
     models/
     data/
@@ -44,7 +45,7 @@ dist-portable/
 
 - `VideoSubtitleLearning.exe` 是 Tauri 桌面壳。
 - `backend/` 是 FastAPI sidecar 代码。
-- `.venv/` 是当前项目的 Python 运行环境复制品。
+- `runtime/python/` 是便携版使用的嵌入式 Python 运行时。
 - `ffmpeg/` 会优先复制项目内的 `ffmpeg/`；如果项目内没有，就尝试从系统 `PATH` 中找到 `ffmpeg.exe` 所在目录并复制。
 - `models/` 会复制当前项目的本地模型目录；如果没有模型，也会创建空目录。
 - `data/`、`outputs/`、`temp/` 是便携版运行时目录。
@@ -133,7 +134,7 @@ cargo build --release
 桌面壳启动后会：
 
 1. 以 exe 所在目录作为 `APP_ROOT`
-2. 在同目录下查找 `.venv\Scripts\python.exe`
+2. 优先在同目录下查找 `runtime\python\python.exe`
 3. 拉起 `backend.app.main:app`
 4. 把 `VIDEO_SUBTITLE_APP_ROOT` 显式传给 sidecar
 5. 让后端改为真正的“桌面同目录模式”
@@ -152,6 +153,6 @@ cargo build --release
 
 ## 当前限制
 
-- 现在的 MVP 便携包仍然是“复制现有 `.venv`”方案，还不是嵌入式 Python 精简运行时。
+- 当前便携包会优先复制一份独立的 `runtime/python`，避免依赖目标机器先安装 Python。
 - `CUDA` 和 `cuDNN` 不会打进首发包里，仍然走“用户本机环境 + 应用内检测”。
 - 如果目标机器没有 `WebView2 Runtime`，还需要额外安装系统运行时。
