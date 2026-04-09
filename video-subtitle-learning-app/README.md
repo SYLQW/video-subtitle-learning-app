@@ -277,6 +277,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-portable.ps1 -CleanOutp
 - [安装与使用指南](docs/user-installation-guide.md)
 - [多语言字幕设计](docs/multilingual-subtitle-design.md)
 - [收集册设计](docs/collection-notebook-design.md)
+- [收集册 PDF 导出设计](docs/notebook-pdf-export-design.md)
 - [图标备选方案](docs/icon-style-ideas.md)
 
 ## 隐私与密钥说明

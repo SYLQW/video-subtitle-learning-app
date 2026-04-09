@@ -41,6 +41,7 @@ from backend.app.services.database import (
 from backend.app.services.exporting import ensure_subtitle_export, export_video_with_subtitles
 from backend.app.services.language_support import normalize_lang_code
 from backend.app.services.llm_common import OpenAICompatibleConfig, post_chat_json, resolve_endpoint
+from backend.app.services.notebook_pdf import build_notebook_pdf
 from backend.app.services.runtime_env import get_runtime_status
 from backend.app.services.settings import get_app_settings, get_llm_profile, save_app_settings
 from backend.app.services.transcription import (
@@ -355,7 +356,7 @@ def _http_error_from_value_error(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=status, detail=detail)
 
 
-def _notebook_export_response(notebook_id: int, export_format: str) -> Response:
+def _notebook_export_response(notebook_id: int, export_format: str, pdf_options: dict[str, Any] | None = None) -> Response:
     payload = get_notebook_export_payload(notebook_id)
     if not payload:
         raise HTTPException(status_code=404, detail=f"Notebook id {notebook_id} not found.")
@@ -477,6 +478,13 @@ def _notebook_export_response(notebook_id: int, export_format: str) -> Response:
                         ]
                     )
         return Response(content="\n".join(lines), media_type="text/markdown", headers=_download_headers(base_name))
+
+    if extension == "pdf":
+        return Response(
+            content=build_notebook_pdf(payload, pdf_options),
+            media_type="application/pdf",
+            headers=_download_headers(base_name),
+        )
 
     raise HTTPException(status_code=400, detail="Unsupported export format.")
 
@@ -654,8 +662,26 @@ def delete_sentence_entry_route(notebook_id: int, entry_id: int) -> dict[str, An
 
 
 @app.get("/api/notebooks/{notebook_id}/export")
-def export_notebook(notebook_id: int, format: str = Query(default="json")) -> Response:
-    return _notebook_export_response(notebook_id, str(format or "json").strip().lower())
+def export_notebook(
+    notebook_id: int,
+    format: str = Query(default="json"),
+    include_improved_translation: bool = Query(default=True),
+    include_structure_explanation: bool = Query(default=True),
+    include_learning_tip: bool = Query(default=True),
+    include_keywords: bool = Query(default=True),
+    include_grammar_points: bool = Query(default=True),
+) -> Response:
+    normalized_format = str(format or "json").strip().lower()
+    pdf_options = None
+    if normalized_format == "pdf":
+        pdf_options = {
+            "include_improved_translation": include_improved_translation,
+            "include_structure_explanation": include_structure_explanation,
+            "include_learning_tip": include_learning_tip,
+            "include_keywords": include_keywords,
+            "include_grammar_points": include_grammar_points,
+        }
+    return _notebook_export_response(notebook_id, normalized_format, pdf_options)
 
 
 @app.post("/api/videos/upload")

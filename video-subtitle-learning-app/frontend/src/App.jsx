@@ -263,6 +263,7 @@ const NOTEBOOK_EXPORT_OPTIONS = [
   { value: "json", label: "JSON" },
   { value: "csv", label: "CSV" },
   { value: "md", label: "Markdown" },
+  { value: "pdf", label: "PDF" },
 ];
 
 const EMPTY_ANALYSIS_STATUS = { loading: false, message: "", streamText: "", error: "" };
@@ -313,6 +314,19 @@ function createNotebookDialogState() {
     name: "",
     saving: false,
     error: "",
+  };
+}
+
+function createPdfExportDialogState() {
+  return {
+    open: false,
+    exporting: false,
+    error: "",
+    include_improved_translation: true,
+    include_structure_explanation: true,
+    include_learning_tip: true,
+    include_keywords: true,
+    include_grammar_points: true,
   };
 }
 
@@ -418,6 +432,7 @@ function App() {
   const [notebookState, setNotebookState] = useState({ loading: false, saving: false, message: "", error: "" });
   const [collectionDialog, setCollectionDialog] = useState(createCollectionDialogState);
   const [notebookDialog, setNotebookDialog] = useState(createNotebookDialogState);
+  const [pdfExportDialog, setPdfExportDialog] = useState(createPdfExportDialogState);
   const [runtimeStatus, setRuntimeStatus] = useState(null);
   const [runtimeState, setRuntimeState] = useState({ loading: false, error: "" });
   const [connectionTestState, setConnectionTestState] = useState({});
@@ -1057,6 +1072,17 @@ function App() {
     setCollectionDialog(createCollectionDialogState());
   }
 
+  function openPdfExportDialog() {
+    setPdfExportDialog({
+      ...createPdfExportDialogState(),
+      open: true,
+    });
+  }
+
+  function closePdfExportDialog() {
+    setPdfExportDialog(createPdfExportDialogState());
+  }
+
   async function submitCollection() {
     if (!collectionDialog.payload) return;
 
@@ -1131,7 +1157,34 @@ function App() {
 
   async function exportNotebook(format) {
     if (!activeNotebook) return;
+    if (format === "pdf" && activeNotebook.type === "sentence") {
+      openPdfExportDialog();
+      return;
+    }
     await downloadExport(`/api/notebooks/${activeNotebook.id}/export?format=${encodeURIComponent(format)}`, `${activeNotebook.name}.${format}`);
+  }
+
+  async function submitPdfExport() {
+    if (!activeNotebook) return;
+    try {
+      setPdfExportDialog((current) => ({ ...current, exporting: true, error: "" }));
+      const params = new URLSearchParams({
+        format: "pdf",
+        include_improved_translation: String(pdfExportDialog.include_improved_translation),
+        include_structure_explanation: String(pdfExportDialog.include_structure_explanation),
+        include_learning_tip: String(pdfExportDialog.include_learning_tip),
+        include_keywords: String(pdfExportDialog.include_keywords),
+        include_grammar_points: String(pdfExportDialog.include_grammar_points),
+      });
+      await downloadExport(`/api/notebooks/${activeNotebook.id}/export?${params.toString()}`, `${activeNotebook.name}.pdf`);
+      closePdfExportDialog();
+    } catch (error) {
+      setPdfExportDialog((current) => ({
+        ...current,
+        exporting: false,
+        error: error instanceof Error ? error.message : "PDF 导出失败。",
+      }));
+    }
   }
 
   async function deleteVideoItem(video) {
@@ -2492,6 +2545,83 @@ function App() {
               <button type="button" className="ghost-button" onClick={closeNotebookDialog}>取消</button>
               <button type="button" className="primary-button" onClick={submitNotebookDialog} disabled={notebookDialog.saving}>
                 {notebookDialog.saving ? "创建中..." : "创建收集册"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {pdfExportDialog.open ? (
+        <div className="dialog-backdrop" onClick={closePdfExportDialog}>
+          <section className="collection-dialog notebook-create-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="collection-dialog-header">
+              <div>
+                <p className="panel-label">PDF Export</p>
+                <h3>句子册 PDF 导出选项</h3>
+              </div>
+              <button type="button" className="ghost-button small" onClick={closePdfExportDialog}>关闭</button>
+            </div>
+
+            <div className="collection-dialog-body">
+              <div className="collection-preview">
+                <strong>{activeNotebook?.name || "句子收集册"}</strong>
+                <p>PDF 会使用浅色 A4 打印样式，并保留基础句子内容。下面这些解析部分可以按需勾选。</p>
+              </div>
+
+              <div className="pdf-export-options">
+                <label className="checkbox-field">
+                  <input
+                    type="checkbox"
+                    checked={pdfExportDialog.include_improved_translation}
+                    onChange={(event) => setPdfExportDialog((current) => ({ ...current, include_improved_translation: event.target.checked, error: "" }))}
+                  />
+                  <span>优化译文</span>
+                </label>
+
+                <label className="checkbox-field">
+                  <input
+                    type="checkbox"
+                    checked={pdfExportDialog.include_structure_explanation}
+                    onChange={(event) => setPdfExportDialog((current) => ({ ...current, include_structure_explanation: event.target.checked, error: "" }))}
+                  />
+                  <span>句子结构</span>
+                </label>
+
+                <label className="checkbox-field">
+                  <input
+                    type="checkbox"
+                    checked={pdfExportDialog.include_learning_tip}
+                    onChange={(event) => setPdfExportDialog((current) => ({ ...current, include_learning_tip: event.target.checked, error: "" }))}
+                  />
+                  <span>学习提示</span>
+                </label>
+
+                <label className="checkbox-field">
+                  <input
+                    type="checkbox"
+                    checked={pdfExportDialog.include_keywords}
+                    onChange={(event) => setPdfExportDialog((current) => ({ ...current, include_keywords: event.target.checked, error: "" }))}
+                  />
+                  <span>关键词</span>
+                </label>
+
+                <label className="checkbox-field">
+                  <input
+                    type="checkbox"
+                    checked={pdfExportDialog.include_grammar_points}
+                    onChange={(event) => setPdfExportDialog((current) => ({ ...current, include_grammar_points: event.target.checked, error: "" }))}
+                  />
+                  <span>语法点</span>
+                </label>
+              </div>
+
+              {pdfExportDialog.error ? <div className="banner error">{pdfExportDialog.error}</div> : null}
+            </div>
+
+            <div className="collection-dialog-footer">
+              <button type="button" className="ghost-button" onClick={closePdfExportDialog}>取消</button>
+              <button type="button" className="primary-button" onClick={submitPdfExport} disabled={pdfExportDialog.exporting}>
+                {pdfExportDialog.exporting ? "导出中..." : "导出 PDF"}
               </button>
             </div>
           </section>

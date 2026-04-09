@@ -1270,6 +1270,19 @@ input[type="checkbox"] {
   line-height: 1.6;
 }
 
+.pdf-export-options {
+  display: grid;
+  gap: 2px;
+  border-radius: 18px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.pdf-export-options .checkbox-field {
+  margin: 0;
+}
+
 @keyframes pulse {
   0% {
     transform: scale(0.9);

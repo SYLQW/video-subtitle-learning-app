@@ -8,7 +8,9 @@
 
 ## 写在前面
 
-下载源码运行的话需要在Releases下载model.bin，并需要将其放进\video-subtitle-learning-app\models\faster-whisper-base中才能使用
+下载源码运行的话需要在Releases下载model.bin，并需要将其放进\video-subtitle-learning-app\models\faster-whisper-base中才能使用youlian
+
+友链：https://linux.do/ （L站）
 
 ## 项目定位
 
@@ -76,7 +78,7 @@
   - 语法点
   - 句子结构说明
   - 学习提示
-  - 可继续追问的问题
+  - 可继续追问的问题（暂时还没做继续追问的聊天窗口😂）
 
 ### 6. 学习收集册
 
@@ -273,24 +275,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-portable.ps1 -CleanOutp
 - [便携版构建说明](docs/portable-build-guide.md)
 - [多语言字幕设计](docs/multilingual-subtitle-design.md)
 - [收集册设计](docs/collection-notebook-design.md)
-- [图标备选方案](docs/icon-style-ideas.md)
-
-## 隐私与密钥说明
-
-这个项目支持用户自己配置翻译服务和大模型 API。
-
-需要特别注意：
-
-- 用户填写的模型配置、API Key、翻译服务 URL 可能会保存在本地运行数据中
-- 当前默认运行数据位于本地 `data/` 目录和桌面便携包对应目录内
-- **不要把自己的运行数据目录直接公开分享**
-- **不要把带有个人配置的便携包直接发给别人**
-
-如果你要对外分享项目，建议：
-
-- 只分享 Git 仓库代码
-- 使用干净的便携发布包
-- 在公开演示前清理本地 `data/` 和便携包中的运行数据
 
 ## 当前阶段说明
 
@@ -317,5 +301,3 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-portable.ps1 -CleanOutp
 ## License
 
 当前仓库尚未添加正式 License。
-
-如果你准备公开发布，建议在后续补充明确的开源协议与第三方依赖说明。

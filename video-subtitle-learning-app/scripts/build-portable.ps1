@@ -198,6 +198,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $frontendDir = Resolve-ProjectPath $projectRoot "frontend"
 $srcTauriDir = Resolve-ProjectPath $projectRoot "src-tauri"
 $backendDir = Resolve-ProjectPath $projectRoot "backend"
+$assetsDir = Resolve-ProjectPath $projectRoot "assets"
 $venvDir = Resolve-ProjectPath $projectRoot ".venv"
 $runtimePythonDir = Resolve-ProjectPath $projectRoot "runtime\python"
 $modelsDir = Resolve-ProjectPath $projectRoot "models"
@@ -256,6 +257,11 @@ if ($webview2Loader) {
 
 Write-Step "Copying backend"
 [void](Copy-Tree -Source $backendDir -Destination (Join-Path $packageRoot "backend") -ExcludeDirectories @("__pycache__", ".pytest_cache", ".mypy_cache") -ExcludeFiles @("*.pyc", "*.pyo"))
+
+if (Test-Path $assetsDir) {
+    Write-Step "Copying assets"
+    [void](Copy-Tree -Source $assetsDir -Destination (Join-Path $packageRoot "assets"))
+}
 
 if (-not $SkipVenvCopy) {
     $embeddedPythonDestination = Join-Path $packageRoot "runtime\python"
