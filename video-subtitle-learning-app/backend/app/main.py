@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from backend.app.services.app_paths import (
     ensure_app_directories,
     get_app_root,
+    get_exports_dir,
     get_transcripts_dir,
     get_translations_dir,
 )
@@ -89,6 +90,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "X-Export-Path"],
 )
 
 
@@ -344,10 +346,24 @@ def _safe_export_name(value: str) -> str:
     return cleaned or "notebook"
 
 
-def _download_headers(filename: str) -> dict[str, str]:
-    return {
+def _download_headers(filename: str, export_path: Path | None = None) -> dict[str, str]:
+    headers = {
         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
     }
+    if export_path is not None:
+        headers["X-Export-Path"] = quote(str(export_path.resolve()), safe=":/\\")
+    return headers
+
+
+def _write_notebook_export_artifact(filename: str, content: str | bytes) -> Path:
+    export_dir = get_exports_dir() / "notebooks"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    export_path = export_dir / filename
+    if isinstance(content, bytes):
+        export_path.write_bytes(content)
+    else:
+        export_path.write_text(content, encoding="utf-8")
+    return export_path
 
 
 def _http_error_from_value_error(exc: ValueError) -> HTTPException:
@@ -367,10 +383,12 @@ def _notebook_export_response(notebook_id: int, export_format: str, pdf_options:
     base_name = f"{_safe_export_name(notebook['name'])}.{extension}"
 
     if extension == "json":
+        content = json.dumps(payload, ensure_ascii=False, indent=2)
+        export_path = _write_notebook_export_artifact(base_name, content)
         return Response(
-            content=json.dumps(payload, ensure_ascii=False, indent=2),
+            content=content,
             media_type="application/json",
-            headers=_download_headers(base_name),
+            headers=_download_headers(base_name, export_path),
         )
 
     if extension == "csv":
@@ -425,7 +443,9 @@ def _notebook_export_response(notebook_id: int, export_format: str, pdf_options:
         writer = csv.DictWriter(buffer, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-        return Response(content=buffer.getvalue(), media_type="text/csv", headers=_download_headers(base_name))
+        content = buffer.getvalue()
+        export_path = _write_notebook_export_artifact(base_name, content)
+        return Response(content=content, media_type="text/csv", headers=_download_headers(base_name, export_path))
 
     if extension == "md":
         lines = [
@@ -477,13 +497,17 @@ def _notebook_export_response(notebook_id: int, export_format: str, pdf_options:
                             "",
                         ]
                     )
-        return Response(content="\n".join(lines), media_type="text/markdown", headers=_download_headers(base_name))
+        content = "\n".join(lines)
+        export_path = _write_notebook_export_artifact(base_name, content)
+        return Response(content=content, media_type="text/markdown", headers=_download_headers(base_name, export_path))
 
     if extension == "pdf":
+        content = build_notebook_pdf(payload, pdf_options)
+        export_path = _write_notebook_export_artifact(base_name, content)
         return Response(
-            content=build_notebook_pdf(payload, pdf_options),
+            content=content,
             media_type="application/pdf",
-            headers=_download_headers(base_name),
+            headers=_download_headers(base_name, export_path),
         )
 
     raise HTTPException(status_code=400, detail="Unsupported export format.")
@@ -1047,6 +1071,7 @@ def export_subtitles(
         export_path,
         media_type="application/x-subrip",
         filename=_download_name(video, export_path),
+        headers={"X-Export-Path": quote(str(Path(export_path).resolve()), safe=":/\\")},
     )
 
 
@@ -1107,4 +1132,5 @@ def export_video(
         export_path,
         media_type="video/mp4",
         filename=_download_name(video, export_path),
+        headers={"X-Export-Path": quote(str(Path(export_path).resolve()), safe=":/\\")},
     )

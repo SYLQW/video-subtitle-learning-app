@@ -21,6 +21,30 @@ use std::os::windows::process::CommandExt;
 #[derive(Default)]
 struct BackendState(Mutex<Option<Child>>);
 
+#[tauri::command]
+fn copy_export_file(source_path: String, target_path: String) -> Result<String, String> {
+    let source = PathBuf::from(&source_path);
+    let target = PathBuf::from(&target_path);
+
+    if !source.exists() {
+        return Err(format!("Export source file not found: {}", source.display()));
+    }
+
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create export directory {}: {error}", parent.display()))?;
+    }
+
+    if source == target {
+        return Ok(target.display().to_string());
+    }
+
+    fs::copy(&source, &target)
+        .map_err(|error| format!("Failed to copy export file to {}: {error}", target.display()))?;
+
+    Ok(target.display().to_string())
+}
+
 fn backend_address() -> SocketAddr {
     format!("{BACKEND_HOST}:{BACKEND_PORT}")
         .parse()
@@ -176,6 +200,9 @@ pub fn run() {
     let app_root = resolve_app_root();
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .invoke_handler(tauri::generate_handler![copy_export_file])
         .setup({
             let app_root = app_root.clone();
             move |app| {

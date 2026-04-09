@@ -1,6 +1,9 @@
 ﻿import { startTransition, useEffect, useRef, useState } from "react";
 
-import { apiFetch, apiUrl } from "./lib/api";
+import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+
+import { apiFetch, apiUrl, isTauriDesktopRuntime } from "./lib/api";
 function formatTime(seconds) {
   const safe = Number.isFinite(seconds) ? Math.floor(seconds) : 0;
   const minutes = Math.floor(safe / 60);
@@ -404,6 +407,15 @@ function parseFilenameFromDisposition(value) {
   }
   const plainMatch = value.match(/filename="?([^";]+)"?/i);
   return plainMatch ? plainMatch[1] : "";
+}
+
+function decodeExportPath(value) {
+  if (!value) return "";
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function App() {
@@ -1161,7 +1173,11 @@ function App() {
       openPdfExportDialog();
       return;
     }
-    await downloadExport(`/api/notebooks/${activeNotebook.id}/export?format=${encodeURIComponent(format)}`, `${activeNotebook.name}.${format}`);
+    await downloadExport(
+      `/api/notebooks/${activeNotebook.id}/export?format=${encodeURIComponent(format)}`,
+      `${activeNotebook.name}.${format}`,
+      { notebookFeedback: true },
+    );
   }
 
   async function submitPdfExport() {
@@ -1176,8 +1192,20 @@ function App() {
         include_keywords: String(pdfExportDialog.include_keywords),
         include_grammar_points: String(pdfExportDialog.include_grammar_points),
       });
-      await downloadExport(`/api/notebooks/${activeNotebook.id}/export?${params.toString()}`, `${activeNotebook.name}.pdf`);
-      closePdfExportDialog();
+      const result = await downloadExport(
+        `/api/notebooks/${activeNotebook.id}/export?${params.toString()}`,
+        `${activeNotebook.name}.pdf`,
+        { notebookFeedback: true },
+      );
+      if (result.ok) {
+        closePdfExportDialog();
+        return;
+      }
+      setPdfExportDialog((current) => ({
+        ...current,
+        exporting: false,
+        error: result.error || "PDF 导出失败。",
+      }));
     } catch (error) {
       setPdfExportDialog((current) => ({
         ...current,
@@ -1522,18 +1550,77 @@ function App() {
     };
   }
 
-  async function downloadExport(path, fallbackName) {
+  function publishExportSuccess(message, notebookFeedback = false) {
+    setExportState(message);
+    setTimeout(() => setExportState(""), 4200);
+    if (notebookFeedback) {
+      setNotebookState((current) => ({ ...current, message, error: "" }));
+    }
+  }
+
+  function publishExportError(message, notebookFeedback = false) {
+    setExportState(message);
+    if (notebookFeedback) {
+      setNotebookState((current) => ({ ...current, error: message }));
+    }
+  }
+
+  function buildExportFilters(filename) {
+    const lower = String(filename || "").toLowerCase();
+    if (lower.endsWith(".pdf")) return [{ name: "PDF", extensions: ["pdf"] }];
+    if (lower.endsWith(".json")) return [{ name: "JSON", extensions: ["json"] }];
+    if (lower.endsWith(".csv")) return [{ name: "CSV", extensions: ["csv"] }];
+    if (lower.endsWith(".md")) return [{ name: "Markdown", extensions: ["md"] }];
+    if (lower.endsWith(".srt")) return [{ name: "SubRip", extensions: ["srt"] }];
+    if (lower.endsWith(".mp4")) return [{ name: "MP4", extensions: ["mp4"] }];
+    return [];
+  }
+
+  async function downloadExport(path, fallbackName, options = {}) {
+    const notebookFeedback = Boolean(options.notebookFeedback);
     try {
       setExportState("正在导出...");
+      if (notebookFeedback) {
+        setNotebookState((current) => ({ ...current, message: "正在导出...", error: "" }));
+      }
       const response = await apiFetch(path);
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.detail || `导出失败：${response.status}`);
       }
 
-      const blob = await response.blob();
       const disposition = response.headers.get("Content-Disposition");
       const filename = parseFilenameFromDisposition(disposition) || fallbackName;
+      const exportPath = decodeExportPath(response.headers.get("X-Export-Path") || "");
+
+      if (isTauriDesktopRuntime()) {
+        const targetPath = await save({
+          title: "导出文件",
+          defaultPath: filename,
+          filters: buildExportFilters(filename),
+        });
+
+        if (!targetPath) {
+          publishExportSuccess("已取消导出。", notebookFeedback);
+          return { ok: false, cancelled: true, error: "" };
+        }
+
+        if (exportPath) {
+          const savedPath = await invoke("copy_export_file", {
+            sourcePath: exportPath,
+            targetPath,
+          });
+          publishExportSuccess(`已导出到 ${savedPath}`, notebookFeedback);
+          return { ok: true, filename, savedPath };
+        }
+
+        throw new Error(
+          `未拿到后端导出路径，无法保存到目标位置。已生成文件可能仍在程序目录 outputs/exports 下。文件名：${filename}`,
+        );
+      }
+
+      const blob = await response.blob();
+
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -1542,10 +1629,12 @@ function App() {
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(url);
-      setExportState(`已导出 ${filename}`);
-      setTimeout(() => setExportState(""), 2200);
+      publishExportSuccess(`已导出 ${filename}`, notebookFeedback);
+      return { ok: true, filename };
     } catch (error) {
-      setExportState(error instanceof Error ? error.message : "导出失败。");
+      const message = error instanceof Error ? error.message : "导出失败。";
+      publishExportError(message, notebookFeedback);
+      return { ok: false, error: message };
     }
   }
 
